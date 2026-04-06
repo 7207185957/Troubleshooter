@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from ec2_troubleshooter.models.alert import Alert, AlertSeverity, AnomalyContributor
 from ec2_troubleshooter.models.findings import (
@@ -57,7 +57,7 @@ class TestInvestigationReport:
             alert_source="test",
             severity="HIGH",
             summary="All clear",
-            started_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=timezone.utc),
         )
         d = report.model_dump(mode="json")
         assert d["alert_id"] == "r1"

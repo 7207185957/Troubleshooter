@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -54,7 +54,7 @@ def sample_report():
         summary="1 instance degraded",
         likely_causes=["High CPU: max=92%", "Memory usage at 78%"],
         instances=[inv],
-        started_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=timezone.utc),
     )
 
 

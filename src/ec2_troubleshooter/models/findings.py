@@ -6,7 +6,7 @@ all applicable diagnostic tools against an EC2 instance.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -78,7 +78,7 @@ class InstanceInvestigation(BaseModel):
     overall_status: DiagnosticStatus = DiagnosticStatus.OK
     summary: str = ""
 
-    started_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     completed_at: datetime | None = None
 
 
@@ -103,7 +103,7 @@ class InvestigationReport(BaseModel):
     likely_causes: list[str] = Field(default_factory=list)
     summary: str = ""
 
-    started_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     completed_at: datetime | None = None
 
     error: str | None = None
