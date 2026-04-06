@@ -24,7 +24,7 @@ customised via PROMETHEUS_VERIFY_SSL / PROMETHEUS_CA_CERT.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -37,7 +37,7 @@ log = structlog.get_logger(__name__)
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=UTC)
+    return datetime.now(tz=timezone.utc)
 
 
 # ── Pre-built node_exporter PromQL expressions ─────────────────────────────

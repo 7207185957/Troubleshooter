@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ec2_troubleshooter.models.alert import (
@@ -329,17 +329,17 @@ class AlertNormalizer:
 
 def _parse_dt(value: Any) -> datetime:
     if value is None:
-        return datetime.now(tz=UTC)
+        return datetime.now(tz=timezone.utc)
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromtimestamp(float(value), tz=UTC)
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
     except (TypeError, ValueError):
         pass
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
-        return datetime.now(tz=UTC)
+        return datetime.now(tz=timezone.utc)
 
 
 def _extract_tag(tags_str: str, key: str) -> str | None:

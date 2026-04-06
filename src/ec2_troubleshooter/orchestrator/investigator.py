@@ -28,7 +28,7 @@ No remediation is ever performed.
 from __future__ import annotations
 
 import contextlib
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import structlog
 
@@ -98,7 +98,7 @@ class InvestigationOrchestrator:
             aiops_state=aiops.state if aiops else None,
             aiops_policy_reason=aiops.policy_reason if aiops else None,
             aiops_app_log_errors=aiops.app_log_errors if aiops else 0,
-            started_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=timezone.utc),
         )
 
         # Resolve Name-tag hostnames → instance IDs when the alert gives names
@@ -111,7 +111,7 @@ class InvestigationOrchestrator:
                 "Alert contains no resolvable instance identifiers – nothing to investigate. "
                 f"instance_ids={alert.instance_ids}, instance_names={alert.instance_names}"
             )
-            report.completed_at = datetime.now(tz=UTC)
+            report.completed_at = datetime.now(tz=timezone.utc)
             log.warning("investigation.no_instances", alert_id=alert.alert_id)
             return report
 
@@ -121,7 +121,7 @@ class InvestigationOrchestrator:
 
         report.likely_causes = self._derive_likely_causes(report)
         report.summary = self._build_report_summary(report)
-        report.completed_at = datetime.now(tz=UTC)
+        report.completed_at = datetime.now(tz=timezone.utc)
 
         log.info(
             "investigation.complete",
@@ -159,7 +159,7 @@ class InvestigationOrchestrator:
         log.info("instance.investigate.start", instance_id=instance_id)
         inv = InstanceInvestigation(
             instance_id=instance_id,
-            started_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=timezone.utc),
         )
         try:
             all_results: list[DiagnosticResult] = []
@@ -230,7 +230,7 @@ class InvestigationOrchestrator:
             inv.overall_status = DiagnosticStatus.ERROR
             inv.summary = f"Investigation failed: {exc}"
 
-        inv.completed_at = datetime.now(tz=UTC)
+        inv.completed_at = datetime.now(tz=timezone.utc)
         log.info(
             "instance.investigate.complete",
             instance_id=instance_id,

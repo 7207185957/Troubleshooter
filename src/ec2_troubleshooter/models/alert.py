@@ -8,7 +8,7 @@ into this canonical shape before passing them to the orchestrator.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -147,7 +147,7 @@ class Alert(BaseModel):
     title: str = Field(..., description="Short human-readable title")
     description: str = Field(default="", description="Optional longer description")
     severity: AlertSeverity = AlertSeverity.UNKNOWN
-    fired_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    fired_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
     # ── Affected resources ────────────────────────────────────────────────
     instance_ids: list[str] = Field(
