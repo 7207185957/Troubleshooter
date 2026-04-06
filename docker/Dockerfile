@@ -27,7 +27,7 @@
 #     -t ec2-troubleshooter:latest .
 # ──────────────────────────────────────────────────────────────────────────────
 
-ARG PYTHON_VERSION=3.12-slim
+ARG PYTHON_VERSION=3.10-slim
 
 # ── Stage 1: dependency builder ────────────────────────────────────────────
 FROM python:${PYTHON_VERSION} AS builder

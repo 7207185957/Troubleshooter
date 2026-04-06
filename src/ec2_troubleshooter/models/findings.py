@@ -7,10 +7,11 @@ all applicable diagnostic tools against an EC2 instance.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from ec2_troubleshooter.compat import StrEnum
 
 
 class FindingSeverity(StrEnum):
