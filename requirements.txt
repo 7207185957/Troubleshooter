@@ -1,11 +1,23 @@
-# Runtime dependencies – pinned ranges suitable for air-gapped pip install from local mirror
+# Runtime dependencies – pure-Python where possible for portable offline builds
 boto3>=1.34,<2.0
 botocore>=1.34,<2.0
 fastapi>=0.111,<1.0
-uvicorn[standard]>=0.29,<1.0
+
+# Plain uvicorn — no [standard] extras.
+# The extras (httptools, uvloop, watchfiles, websockets) are C extensions that
+# produce platform-specific wheels.  If pip download runs on macOS or a
+# different Python version than the Docker target, those wheels will be wrong
+# and the offline build fails.  The pure-Python uvicorn works perfectly well.
+uvicorn>=0.29,<1.0
+
 pydantic>=2.7,<3.0
 pydantic-settings>=2.3,<3.0
 httpx>=0.27,<1.0
 anyio>=4.4,<5.0
+# Required by anyio on Python < 3.11 (exceptiongroup is stdlib in 3.11+)
+# Listed explicitly so pip download picks them up regardless of the
+# Python version running the download command.
+exceptiongroup>=1.0.2
+sniffio>=1.1
 structlog>=24.2,<25.0
 tenacity>=8.3,<10.0
