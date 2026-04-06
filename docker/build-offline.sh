@@ -2,22 +2,22 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # build-offline.sh
 #
-# Run this script on a machine WITH internet access.
-# It produces a single .tar.gz file that you transfer to the air-gapped EC2
-# instance and load into Docker — no internet needed on the target host.
+# Run on a machine WITH internet access.
+# Produces a single .tar.gz that you transfer to the air-gapped EC2 instance
+# and load into Docker — no internet needed on the target host.
+# No docker-compose required anywhere.
 #
 # Usage:
 #   bash docker/build-offline.sh [image-tag] [s3-bucket]
 #
-#   image-tag  – Docker image tag to use  (default: latest)
-#   s3-bucket  – If provided, uploads the tar.gz to this S3 bucket
-#                automatically after building.
+#   image-tag   Docker image tag   (default: latest)
+#   s3-bucket   If set, uploads the tar.gz to this S3 bucket after building
 #
-# What it does:
-#   1. Downloads all Python wheels into docker/wheels/
-#   2. Builds the Docker image from Dockerfile.offline (wheels baked in)
-#   3. Saves the image as a compressed .tar.gz
-#   4. Optionally uploads to S3
+# Steps performed:
+#   1. Download all Python wheels into docker/wheels/
+#   2. Build Docker image from Dockerfile.offline  (wheels baked in)
+#   3. Save as a compressed .tar.gz
+#   4. Optionally upload to S3
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -34,8 +34,9 @@ cd "$REPO_ROOT"
 
 echo "══════════════════════════════════════════════════════════"
 echo "  EC2 Troubleshooter – offline Docker build"
-echo "  Image  : ${IMAGE_NAME}:${IMAGE_TAG}"
-echo "  Output : ${TAR_FILE}"
+echo "  Python  : 3.10-slim (matches target host Python 3.10.x)"
+echo "  Image   : ${IMAGE_NAME}:${IMAGE_TAG}"
+echo "  Output  : ${TAR_FILE}"
 echo "══════════════════════════════════════════════════════════"
 
 # ── Step 1: Download wheels ─────────────────────────────────────────────────
@@ -48,19 +49,20 @@ echo "  ✓ ${WHEEL_COUNT} wheel files downloaded"
 
 # ── Step 2: Build Docker image ─────────────────────────────────────────────
 echo ""
-echo "▶ Step 2/4 – Building Docker image (wheels baked in, no internet needed)"
+echo "▶ Step 2/4 – Building Docker image (Python 3.10, wheels baked in)"
 docker build \
+    --build-arg PYTHON_VERSION=3.10-slim \
     -f docker/Dockerfile.offline \
     -t "${IMAGE_NAME}:${IMAGE_TAG}" \
     .
 echo "  ✓ Image built: ${IMAGE_NAME}:${IMAGE_TAG}"
 
-# ── Step 3: Save image to tar.gz ───────────────────────────────────────────
+# ── Step 3: Save as tar.gz ─────────────────────────────────────────────────
 echo ""
-echo "▶ Step 3/4 – Saving image to ${TAR_FILE}"
+echo "▶ Step 3/4 – Saving image to $(basename "${TAR_FILE}")"
 docker save "${IMAGE_NAME}:${IMAGE_TAG}" | gzip > "${TAR_FILE}"
 SIZE=$(du -sh "${TAR_FILE}" | cut -f1)
-echo "  ✓ Saved (${SIZE})"
+echo "  ✓ Saved: ${SIZE}"
 
 # ── Step 4: Upload to S3 (optional) ────────────────────────────────────────
 if [[ -n "${S3_BUCKET}" ]]; then
@@ -68,26 +70,44 @@ if [[ -n "${S3_BUCKET}" ]]; then
     echo "▶ Step 4/4 – Uploading to s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${TAR_FILE}")"
     aws s3 cp "${TAR_FILE}" "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${TAR_FILE}")"
     echo "  ✓ Uploaded"
-    echo ""
-    echo "On the air-gapped EC2 instance, run:"
-    echo "  aws s3 cp s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${TAR_FILE}") ."
-    echo "  docker load < $(basename "${TAR_FILE}")"
+    TRANSFER_CMD="aws s3 cp s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${TAR_FILE}") ."
 else
     echo ""
     echo "▶ Step 4/4 – Skipped (no S3_BUCKET provided)"
-    echo ""
-    echo "Transfer the image manually, then on the EC2 instance run:"
-    echo "  docker load < $(basename "${TAR_FILE}")"
+    echo "  Transfer $(basename "${TAR_FILE}") to the EC2 instance manually (SCP via bastion, etc.)"
+    TRANSFER_CMD="# scp -J bastion-user@bastion $(basename "${TAR_FILE}") ec2-user@<private-ip>:~"
 fi
 
 echo ""
 echo "══════════════════════════════════════════════════════════"
 echo "  Build complete."
 echo ""
-echo "  On the air-gapped EC2 instance:"
-echo "    1. Load:  docker load < ${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
-echo "    2. Copy config: cp .env.example /etc/ec2-troubleshooter/.env && vi /etc/ec2-troubleshooter/.env"
-echo "    3. Run:   docker compose -f docker/docker-compose.yml up -d"
-echo "    4. Check: docker compose -f docker/docker-compose.yml ps"
-echo "    5. Logs:  docker compose -f docker/docker-compose.yml logs -f"
+echo "  On the air-gapped EC2 instance run:"
+echo ""
+echo "  # 1. Get the image"
+echo "  ${TRANSFER_CMD}"
+echo ""
+echo "  # 2. Load into Docker (no internet needed)"
+echo "  docker load < $(basename "${TAR_FILE}")"
+echo ""
+echo "  # 3. Create config"
+echo "  sudo mkdir -p /etc/ec2-troubleshooter"
+echo "  sudo cp .env.example /etc/ec2-troubleshooter/.env"
+echo "  sudo vi /etc/ec2-troubleshooter/.env"
+echo ""
+echo "  # 4. Run (plain docker run — no docker-compose needed)"
+echo "  docker run -d \\"
+echo "    --name ec2-troubleshooter \\"
+echo "    --restart unless-stopped \\"
+echo "    --env-file /etc/ec2-troubleshooter/.env \\"
+echo "    -p 8080:8080 \\"
+echo "    --log-driver json-file \\"
+echo "    --log-opt max-size=50m \\"
+echo "    --log-opt max-file=5 \\"
+echo "    ${IMAGE_NAME}:${IMAGE_TAG}"
+echo ""
+echo "  # 5. Verify"
+echo "  docker ps"
+echo "  curl http://localhost:8080/health"
+echo "  docker logs -f ec2-troubleshooter"
 echo "══════════════════════════════════════════════════════════"
