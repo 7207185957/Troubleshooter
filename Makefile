@@ -42,9 +42,16 @@ build:  ## Build the standard image (requires internet on build host)
 	docker build -f docker/Dockerfile -t $(FULL_IMAGE) .
 	@echo "Built: $(FULL_IMAGE)"
 
-wheels:  ## Download Python wheels for offline build (requires internet)
+wheels:  ## Download Python wheels for manylinux/amd64 + Python 3.10 (requires internet)
 	@mkdir -p docker/wheels
-	pip download -r requirements.txt -d docker/wheels/
+	pip download \
+	  --dest docker/wheels/ \
+	  --python-version 3.10 \
+	  --implementation cp \
+	  --abi cp310 \
+	  --platform manylinux_2_17_x86_64 \
+	  --only-binary=:all: \
+	  -r requirements.txt
 	@echo "Done – $(shell ls docker/wheels/ | wc -l | tr -d ' ') wheels in docker/wheels/"
 
 build-offline: wheels  ## Build the offline image (no internet needed after this step)
