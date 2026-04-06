@@ -27,7 +27,8 @@ evidence, and reports.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  Investigation Orchestrator                                              │
 │   • Iterates over all instance_ids in the alert                          │
-│   • Calls EC2ToolServer.run_standard_suite(instance_id)                  │
+│   • Resolves private IP via EC2 describe, passes it to Prometheus tools  │
+│   • Queries alert contributor metrics from Mimir by name                 │
 │   • Passes raw results through EvidenceAnalyzer                          │
 │   • Assembles InvestigationReport                                        │
 └───────────────────────────────┬──────────────────────────────────────────┘
@@ -37,29 +38,33 @@ evidence, and reports.
 │  EC2 Tool Server  (MCP-style bounded interface)                          │
 │                                                                          │
 │  ┌─────────────────────┐  ┌────────────────────────┐  ┌───────────────┐ │
-│  │  EC2 Tools          │  │  CloudWatch Tools       │  │  SSM Tools    │ │
-│  │  describe_instance  │  │  cpu_utilization        │  │  Allowlist    │ │
-│  │  get_instance_status│  │  disk_io                │  │  (25+ cmds)   │ │
-│  │  describe_volumes   │  │  network_io             │  │  read-only    │ │
-│  │  get_console_output │  │  status_check_metrics   │  │  shell cmds   │ │
+│  │  EC2 Tools          │  │  Prometheus Tools       │  │  SSM Tools    │ │
+│  │  describe_instance  │  │  node_metrics           │  │  Allowlist    │ │
+│  │  get_instance_status│  │  query (raw PromQL)     │  │  (20+ cmds)   │ │
+│  │  describe_volumes   │  │  query_range            │  │  read-only    │ │
+│  │  get_console_output │  │  contributor_metric     │  │  shell cmds   │ │
 │  └──────────┬──────────┘  └──────────┬─────────────┘  └───────┬───────┘ │
-│             │  AWS EC2 API           │  CloudWatch API         │ SSM     │
+│             │  AWS EC2 API           │  PromQL HTTP API        │ SSM     │
 └─────────────┼────────────────────────┼─────────────────────────┼─────────┘
               │                        │                         │
-              │  (VPC Interface Endpoints in air-gapped envs)    │
+              │  VPC endpoints         │  Internal Mimir URL     │
               ▼                        ▼                         ▼
-         AWS EC2 API           AWS CloudWatch            AWS SSM Run Command
+         AWS EC2 API          Grafana Mimir / Prometheus   AWS SSM Run Command
+                              (X-Scope-OrgID per tenant)
 ```
 
 ### Key design decisions
 
 | Decision | Rationale |
 |---|---|
-| **MCP-style tool server boundary** | The orchestrator never talks to AWS directly. All AWS calls go through the `EC2ToolServer`, which enforces the read-only and allowlist contracts. |
-| **SSM allowlist** | Only 25 pre-approved, audited read-only shell commands can run via SSM. No freeform shell. No arbitrary command construction. |
+| **MCP-style tool server boundary** | The orchestrator never talks to AWS or Mimir directly. All calls go through `EC2ToolServer`, which enforces the read-only and allowlist contracts. |
+| **Prometheus/Mimir for metrics** | All node-level and app-specific metrics come from Grafana Mimir via the Prometheus-compatible HTTP API (`/api/v1/query`, `/api/v1/query_range`). No CloudWatch. `X-Scope-OrgID` is sent on every request for multi-tenant Mimir. |
+| **Instance IP → Prometheus label** | The orchestrator resolves the private IP via EC2 `describe_instances`, then uses it as a `instance=~"<ip>(:[0-9]+)?"` label selector so node_exporter series are correctly matched regardless of port. |
+| **Contributor metric passthrough** | Alert contributor `metric_name` values that look like valid PromQL metric names are automatically queried against Mimir so the exact signal that fired the alert appears in the report. |
+| **SSM allowlist** | Only 20 pre-approved, audited read-only shell commands can run via SSM. No freeform shell. No arbitrary command construction. |
 | **No SSH** | All host-level commands go through AWS SSM Run Command (requires SSM agent + IAM role). No ports to open, no keys to manage. |
-| **VPC endpoint support** | Every boto3 client accepts an `endpoint_url` override so all traffic stays within the VPC, satisfying air-gapped / no-internet requirements. |
-| **Generic diagnostics only** | No app-specific logic (Airflow, Kafka, etc.). The tool layer only answers OS/infrastructure questions: CPU, memory, disk, network, processes, kernel errors. |
+| **VPC endpoint support** | Every boto3 client accepts an `endpoint_url` override (EC2, SSM, STS). Mimir is an internal URL by nature and needs no special routing. |
+| **Generic diagnostics only** | No app-specific logic. The tool layer only answers OS/infrastructure questions. App-specific metric interpretation is left to the human responder. |
 | **No remediation** | The agent never restarts services, reboots instances, modifies ASGs or changes configurations. |
 
 ---
@@ -155,11 +160,22 @@ All settings are environment variables (or `.env` file entries).
 | `AWS_REGION` | `us-east-1` | AWS region |
 | `AWS_PROFILE` | _(none)_ | Named AWS profile |
 | **Air-gapped VPC endpoints** | | |
-| `USE_VPC_ENDPOINTS` | `false` | Route all SDK calls through VPC endpoints |
+| `USE_VPC_ENDPOINTS` | `false` | Route all AWS SDK calls through VPC endpoints |
 | `VPC_ENDPOINT_EC2` | _(none)_ | EC2 VPC interface endpoint URL |
 | `VPC_ENDPOINT_SSM` | _(none)_ | SSM VPC interface endpoint URL |
-| `VPC_ENDPOINT_CLOUDWATCH` | _(none)_ | CloudWatch VPC interface endpoint URL |
 | `VPC_ENDPOINT_STS` | _(none)_ | STS VPC interface endpoint URL |
+| **Prometheus / Grafana Mimir** | | |
+| `PROMETHEUS_URL` | _(none)_ | Mimir query frontend base URL, e.g. `http://mimir.internal:8080/prometheus` |
+| `PROMETHEUS_ORG_ID` | _(none)_ | Mimir tenant ID — sent as `X-Scope-OrgID` header |
+| `PROMETHEUS_INSTANCE_LABEL` | `instance` | Label that identifies the host, e.g. `instance` for node_exporter |
+| `PROMETHEUS_LOOKBACK_MINUTES` | `60` | How many minutes of history to query |
+| `PROMETHEUS_STEP_SECONDS` | `60` | Range query resolution in seconds |
+| `PROMETHEUS_TOKEN` | _(none)_ | Bearer token (Grafana service account) |
+| `PROMETHEUS_USERNAME` | _(none)_ | Basic-auth username |
+| `PROMETHEUS_PASSWORD` | _(none)_ | Basic-auth password |
+| `PROMETHEUS_VERIFY_SSL` | `true` | Verify TLS certificates |
+| `PROMETHEUS_CA_CERT` | _(none)_ | Path to custom CA bundle for internal PKI |
+| `PROMETHEUS_TIMEOUT_SEC` | `30` | HTTP timeout for Mimir queries |
 | **SSM** | | |
 | `SSM_POLL_INTERVAL_SEC` | `3` | Seconds between SSM status polls |
 | `SSM_MAX_WAIT_SEC` | `120` | Max seconds to wait for SSM command |
@@ -180,15 +196,14 @@ All settings are environment variables (or `.env` file entries).
 
 ## Air-gapped deployment
 
-When the troubleshooter EC2 instance has **no internet access**, configure
-VPC Interface Endpoints for the required AWS services and set the corresponding
-environment variables:
+When the troubleshooter EC2 instance has **no internet access**:
+
+**AWS services** — configure VPC Interface Endpoints and set the overrides:
 
 ```bash
 USE_VPC_ENDPOINTS=true
 VPC_ENDPOINT_EC2=https://vpce-xxxxxxxxxxxx.ec2.us-east-1.vpce.amazonaws.com
 VPC_ENDPOINT_SSM=https://vpce-xxxxxxxxxxxx.ssm.us-east-1.vpce.amazonaws.com
-VPC_ENDPOINT_CLOUDWATCH=https://vpce-xxxxxxxxxxxx.monitoring.us-east-1.vpce.amazonaws.com
 VPC_ENDPOINT_STS=https://vpce-xxxxxxxxxxxx.sts.us-east-1.vpce.amazonaws.com
 ```
 
@@ -200,8 +215,12 @@ Required VPC endpoints:
 | SSM | `com.amazonaws.<region>.ssm` |
 | SSM Messages | `com.amazonaws.<region>.ssmmessages` |
 | EC2 Messages | `com.amazonaws.<region>.ec2messages` |
-| CloudWatch | `com.amazonaws.<region>.monitoring` |
 | STS | `com.amazonaws.<region>.sts` |
+
+**Grafana Mimir** — no special routing needed. `PROMETHEUS_URL` is already an
+internal URL (e.g. `http://mimir.internal:8080/prometheus`).  For HTTPS with
+an internal CA, set `PROMETHEUS_CA_CERT=/etc/ssl/certs/internal-ca.crt` or
+`PROMETHEUS_VERIFY_SSL=false`.
 
 For **offline Docker builds** (no internet on the build host):
 

@@ -52,9 +52,5 @@ class AWSClientFactory:
         return self._client("ssm")
 
     @property
-    def cloudwatch(self) -> boto3.client:  # type: ignore[name-defined]
-        return self._client("cloudwatch")
-
-    @property
     def sts(self) -> boto3.client:  # type: ignore[name-defined]
         return self._client("sts")

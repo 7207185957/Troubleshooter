@@ -44,25 +44,38 @@ class TestInstanceStateAnalysis:
 
 
 class TestCPUAnalysis:
-    def test_high_cpu_degraded(self, analyzer):
+    def test_high_cpu_critical_from_prometheus(self, analyzer):
         result = DiagnosticResult(
-            tool_name="cloudwatch:cpu_utilization",
-            status=DiagnosticStatus.DEGRADED,
-            summary="High CPU",
-            metrics={"cpu_utilization_pct": {"latest": 85.0, "max": 96.0, "avg": 82.0, "min": 50.0}},
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.FAILED,
+            summary="CPU=97.0%, Mem=50.0%, Load1m=12.00",
+            metrics={"cpu_usage_pct": 97.0, "memory_used_pct": 50.0, "load_1m": 12.0},
         )
         inv = InstanceInvestigation(instance_id="i-003", diagnostics=[result])
         analyzer.analyze(inv)
         cpu_findings = [f for f in inv.findings if f.category == "cpu"]
         assert len(cpu_findings) >= 1
-        assert cpu_findings[0].severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+        assert cpu_findings[0].severity == FindingSeverity.CRITICAL
+
+    def test_elevated_cpu_high_from_prometheus(self, analyzer):
+        result = DiagnosticResult(
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.DEGRADED,
+            summary="CPU=83.0%",
+            metrics={"cpu_usage_pct": 83.0},
+        )
+        inv = InstanceInvestigation(instance_id="i-003b", diagnostics=[result])
+        analyzer.analyze(inv)
+        cpu_findings = [f for f in inv.findings if f.category == "cpu"]
+        assert len(cpu_findings) >= 1
+        assert cpu_findings[0].severity == FindingSeverity.HIGH
 
     def test_normal_cpu_no_findings(self, analyzer):
         result = DiagnosticResult(
-            tool_name="cloudwatch:cpu_utilization",
+            tool_name="prometheus:node_metrics",
             status=DiagnosticStatus.OK,
-            summary="Normal CPU",
-            metrics={"cpu_utilization_pct": {"latest": 20.0, "max": 35.0, "avg": 22.0, "min": 10.0}},
+            summary="CPU=20.0%, Mem=40.0%",
+            metrics={"cpu_usage_pct": 20.0, "memory_used_pct": 40.0},
         )
         inv = InstanceInvestigation(instance_id="i-004", diagnostics=[result])
         analyzer.analyze(inv)
@@ -97,7 +110,24 @@ class TestDiskAnalysis:
 
 
 class TestMemoryAnalysis:
-    def test_critical_memory(self, analyzer):
+    def test_critical_memory_from_prometheus(self, analyzer):
+        result = DiagnosticResult(
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.FAILED,
+            summary="Mem=97.0%",
+            metrics={
+                "memory_used_pct": 97.0,
+                "memory_available_bytes": 100 * 1024 * 1024,
+                "memory_total_bytes": 8 * 1024 * 1024 * 1024,
+            },
+        )
+        inv = InstanceInvestigation(instance_id="i-007a", diagnostics=[result])
+        analyzer.analyze(inv)
+        mem_findings = [f for f in inv.findings if f.category == "memory"]
+        assert len(mem_findings) >= 1
+        assert mem_findings[0].severity == FindingSeverity.CRITICAL
+
+    def test_critical_memory_from_ssm(self, analyzer):
         # free -m format
         output = "              total        used        free      shared  buff/cache   available\nMem:           8192        8000         192\nSwap:             0           0           0"
         result = DiagnosticResult(
@@ -105,7 +135,7 @@ class TestMemoryAnalysis:
             status=DiagnosticStatus.OK,
             raw_output=output,
         )
-        inv = InstanceInvestigation(instance_id="i-007", diagnostics=[result])
+        inv = InstanceInvestigation(instance_id="i-007b", diagnostics=[result])
         analyzer.analyze(inv)
         mem_findings = [f for f in inv.findings if f.category == "memory"]
         assert len(mem_findings) >= 1
@@ -137,12 +167,57 @@ class TestOOMAnalysis:
         assert len(os_findings) >= 1
 
 
+class TestPrometheusFindings:
+    def test_oom_kill_critical(self, analyzer):
+        result = DiagnosticResult(
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.FAILED,
+            summary="OOM kills active",
+            metrics={"oom_kills_rate": 0.05},
+        )
+        inv = InstanceInvestigation(instance_id="i-011", diagnostics=[result])
+        analyzer.analyze(inv)
+        oom_findings = [f for f in inv.findings if "OOM" in f.message]
+        assert len(oom_findings) >= 1
+        assert oom_findings[0].severity == FindingSeverity.CRITICAL
+
+    def test_disk_full_critical_from_vector(self, analyzer):
+        result = DiagnosticResult(
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.DEGRADED,
+            summary="disk full",
+            metrics={
+                "disk_used_pct": [
+                    {"labels": {"mountpoint": "/", "device": "/dev/xvda1"}, "value": 97.0}
+                ]
+            },
+        )
+        inv = InstanceInvestigation(instance_id="i-012", diagnostics=[result])
+        analyzer.analyze(inv)
+        disk_findings = [f for f in inv.findings if f.category == "disk"]
+        assert any(f.severity == FindingSeverity.CRITICAL for f in disk_findings)
+
+    def test_contributor_metric_info_finding(self, analyzer):
+        result = DiagnosticResult(
+            tool_name="prometheus:contributor:kafka_consumer_lag",
+            status=DiagnosticStatus.OK,
+            summary="kafka_consumer_lag current value: 5000",
+            metrics={"metric": "kafka_consumer_lag", "result": 5000.0},
+        )
+        inv = InstanceInvestigation(instance_id="i-013", diagnostics=[result])
+        analyzer.analyze(inv)
+        app_findings = [f for f in inv.findings if f.category == "app_metric"]
+        assert len(app_findings) >= 1
+        assert app_findings[0].severity == FindingSeverity.INFO
+
+
 class TestOverallStatus:
     def test_overall_status_reflects_worst_finding(self, analyzer):
         result = DiagnosticResult(
-            tool_name="cloudwatch:cpu_utilization",
-            status=DiagnosticStatus.DEGRADED,
-            metrics={"cpu_utilization_pct": {"latest": 98.0, "max": 99.0, "avg": 97.0, "min": 90.0}},
+            tool_name="prometheus:node_metrics",
+            status=DiagnosticStatus.FAILED,
+            summary="CPU=98.0%",
+            metrics={"cpu_usage_pct": 98.0},
         )
         inv = InstanceInvestigation(instance_id="i-010", diagnostics=[result])
         analyzer.analyze(inv)

@@ -211,6 +211,36 @@ class EC2Tools:
                 error=str(exc),
             )
 
+    def resolve_instance_names(self, names: list[str]) -> dict[str, str]:
+        """
+        Resolve EC2 Name-tag values to instance IDs.
+
+        Returns a dict mapping name → instance_id for all names that were
+        found.  Names that cannot be matched are omitted from the result so
+        the caller can log the gap.
+
+        Uses ``describe_instances`` with a ``tag:Name`` filter — entirely
+        read-only.
+        """
+        if not names:
+            return {}
+        try:
+            resp = self._ec2.describe_instances(
+                Filters=[{"Name": "tag:Name", "Values": names}]
+            )
+            result: dict[str, str] = {}
+            for reservation in resp.get("Reservations", []):
+                for inst in reservation.get("Instances", []):
+                    instance_id = inst.get("InstanceId", "")
+                    tags = {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
+                    name = tags.get("Name", "")
+                    if name and instance_id:
+                        result[name] = instance_id
+            return result
+        except Exception as exc:
+            log.warning("ec2.resolve_instance_names failed", names=names, error=str(exc))
+            return {}
+
     def get_caller_identity(self) -> dict[str, str]:
         """Return the AWS caller identity – useful for confirming air-gapped connectivity."""
         try:

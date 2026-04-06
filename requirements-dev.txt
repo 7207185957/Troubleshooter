@@ -2,7 +2,7 @@
 pytest>=8.2,<9.0
 pytest-asyncio>=0.23,<1.0
 pytest-cov>=5.0,<6.0
-moto[ec2,cloudwatch,ssm,sts]>=5.0,<6.0
+moto[ec2,ssm,sts]>=5.0,<6.0
 respx>=0.21,<1.0
 ruff>=0.4,<1.0
 mypy>=1.10,<2.0

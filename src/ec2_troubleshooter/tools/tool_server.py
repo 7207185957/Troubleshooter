@@ -2,15 +2,18 @@
 EC2 Tool Server – MCP-style bounded tool interface.
 
 This class is the single point of entry for all diagnostic tool calls.  The
-orchestrator never talks to AWS directly; it always goes through this server.
-The server enforces:
+orchestrator never talks to AWS or Prometheus directly; it always goes through
+this server.  The server enforces:
 
   1. Read-only contract  – no mutating API is ever called.
   2. Allowlist contract  – only SSM commands in ALLOWLISTED_COMMANDS can run.
   3. Error containment   – every tool call returns a DiagnosticResult; errors
                            are captured and returned rather than propagated.
 
-Think of this as the MCP server side of the agent boundary.
+Metric backend
+──────────────
+Node-level and application metrics are queried from Grafana Mimir (or any
+Prometheus-compatible backend) via PrometheusTools.  CloudWatch is not used.
 """
 
 from __future__ import annotations
@@ -21,9 +24,9 @@ from ec2_troubleshooter.config import Settings
 from ec2_troubleshooter.models.findings import DiagnosticResult, DiagnosticStatus
 
 from .aws_client import AWSClientFactory
-from .cloudwatch_tools import CloudWatchTools
 from .ec2_tools import EC2Tools
-from .ssm_tools import ALLOWLISTED_COMMANDS, SSMTools
+from .prometheus_tools import PrometheusTools
+from .ssm_tools import ALLOWLISTED_COMMANDS, DIAGNOSTIC_PROFILES, SSMTools
 
 log = structlog.get_logger(__name__)
 
@@ -41,7 +44,7 @@ class EC2ToolServer:
         factory = AWSClientFactory(settings)
         self._ec2_tools = EC2Tools(factory)
         self._ssm_tools = SSMTools(factory, settings)
-        self._cw_tools = CloudWatchTools(factory)
+        self._prom_tools = PrometheusTools(settings)
 
     # ── Tool catalogue ─────────────────────────────────────────────────────
 
@@ -52,15 +55,17 @@ class EC2ToolServer:
             "ec2:get_instance_status",
             "ec2:describe_volumes",
             "ec2:get_console_output",
+            "ec2:resolve_instance_names",
         ]
-        cw_tools = [
-            "cloudwatch:cpu_utilization",
-            "cloudwatch:disk_io",
-            "cloudwatch:network_io",
-            "cloudwatch:status_check_metrics",
+        prom_tools = [
+            "prometheus:node_metrics",
+            "prometheus:query",
+            "prometheus:query_range",
+            "prometheus:contributor_metric",
         ]
         ssm_tools = [f"ssm:{k}" for k in ALLOWLISTED_COMMANDS]
-        return sorted(ec2_tools + cw_tools + ssm_tools)
+        ssm_profiles = [f"ssm:profile:{k}" for k in DIAGNOSTIC_PROFILES]
+        return sorted(ec2_tools + prom_tools + ssm_tools + ssm_profiles)
 
     # ── Dispatch ───────────────────────────────────────────────────────────
 
@@ -68,9 +73,11 @@ class EC2ToolServer:
         """
         Invoke a named tool for *instance_id*.
 
-        Extra *kwargs* are passed to tools that need them (e.g. volume_id for
-        the EBS metrics tool).  Unknown tool names return an ERROR result
-        rather than raising an exception so the orchestrator can continue.
+        Extra *kwargs* are forwarded to tools that need them:
+          - ``instance_ip``   – private IP for Prometheus label matching
+          - ``promql``        – PromQL expression for prometheus:query / query_range
+          - ``metric_name``   – metric name for prometheus:contributor_metric
+          - ``extra_labels``  – dict of additional label filters
         """
         log.debug("tool_server.call", instance_id=instance_id, tool=tool_name)
         try:
@@ -92,6 +99,9 @@ class EC2ToolServer:
     def _dispatch(
         self, instance_id: str, tool_name: str, **kwargs: object
     ) -> DiagnosticResult:
+        instance_ip = str(kwargs.get("instance_ip", ""))
+        org_id = kwargs.get("org_id")  # optional X-Scope-OrgID override
+
         # ── EC2 tools ─────────────────────────────────────────────────────
         if tool_name == "ec2:describe_instance":
             return self._ec2_tools.describe_instance(instance_id)
@@ -101,27 +111,94 @@ class EC2ToolServer:
             return self._ec2_tools.describe_volumes(instance_id)
         if tool_name == "ec2:get_console_output":
             return self._ec2_tools.get_console_output(instance_id)
-
-        # ── CloudWatch tools ──────────────────────────────────────────────
-        if tool_name == "cloudwatch:cpu_utilization":
-            return self._cw_tools.get_cpu_utilization(instance_id)
-        if tool_name == "cloudwatch:disk_io":
-            return self._cw_tools.get_disk_io(instance_id)
-        if tool_name == "cloudwatch:network_io":
-            return self._cw_tools.get_network_io(instance_id)
-        if tool_name == "cloudwatch:status_check_metrics":
-            return self._cw_tools.get_status_check_metrics(instance_id)
-        if tool_name == "cloudwatch:ebs_metrics":
-            volume_id = str(kwargs.get("volume_id", ""))
-            if not volume_id:
+        if tool_name == "ec2:resolve_instance_names":
+            names = kwargs.get("names", [])
+            if not isinstance(names, list):
                 return DiagnosticResult(
                     tool_name=tool_name,
                     status=DiagnosticStatus.ERROR,
-                    summary="volume_id kwarg required for cloudwatch:ebs_metrics",
+                    summary="names kwarg must be a list of strings",
                 )
-            return self._cw_tools.get_ebs_metrics(instance_id, volume_id)
+            mapping = self._ec2_tools.resolve_instance_names(names)
+            resolved = len(mapping)
+            unresolved = len(names) - resolved
+            status = DiagnosticStatus.OK if unresolved == 0 else DiagnosticStatus.DEGRADED
+            return DiagnosticResult(
+                tool_name=tool_name,
+                status=status,
+                summary=f"Resolved {resolved}/{len(names)} instance names to IDs",
+                metrics={"name_to_id": mapping, "unresolved_count": unresolved},
+            )
 
-        # ── SSM tools ─────────────────────────────────────────────────────
+        # ── Prometheus / Mimir tools ───────────────────────────────────────
+        if tool_name == "prometheus:node_metrics":
+            if not instance_ip:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary="instance_ip kwarg required for prometheus:node_metrics",
+                )
+            return self._prom_tools.get_node_metrics(
+                instance_ip, org_id=str(org_id) if org_id else None
+            )
+
+        if tool_name == "prometheus:query":
+            promql = str(kwargs.get("promql", ""))
+            if not promql:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary="promql kwarg required for prometheus:query",
+                )
+            return self._prom_tools.query(
+                promql,
+                instance_ip=instance_ip or None,
+                org_id=str(org_id) if org_id else None,
+            )
+
+        if tool_name == "prometheus:query_range":
+            promql = str(kwargs.get("promql", ""))
+            if not promql:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary="promql kwarg required for prometheus:query_range",
+                )
+            lookback = kwargs.get("lookback_minutes")
+            return self._prom_tools.query_range(
+                promql,
+                instance_ip=instance_ip or None,
+                lookback_minutes=int(lookback) if lookback else None,
+                org_id=str(org_id) if org_id else None,
+            )
+
+        if tool_name == "prometheus:contributor_metric":
+            metric_name = str(kwargs.get("metric_name", ""))
+            if not metric_name or not instance_ip:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary="metric_name and instance_ip kwargs required",
+                )
+            extra_labels = kwargs.get("extra_labels")
+            return self._prom_tools.get_contributor_metrics(
+                metric_name,
+                instance_ip,
+                org_id=str(org_id) if org_id else None,
+                extra_labels=extra_labels if isinstance(extra_labels, dict) else None,
+            )
+
+        # ── SSM individual command ─────────────────────────────────────────
+        if tool_name.startswith("ssm:profile:"):
+            profile_key = tool_name[12:]
+            if profile_key not in DIAGNOSTIC_PROFILES:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary=f"Unknown SSM diagnostic profile '{profile_key}'",
+                )
+            return self._run_ssm_profile(instance_id, profile_key)
+
         if tool_name.startswith("ssm:"):
             command_key = tool_name[4:]
             if command_key not in ALLOWLISTED_COMMANDS:
@@ -139,31 +216,78 @@ class EC2ToolServer:
             summary=f"Unknown tool: '{tool_name}'",
         )
 
+    def _run_ssm_profile(self, instance_id: str, profile_key: str) -> DiagnosticResult:
+        """Run all commands in a named diagnostic profile sequentially."""
+        keys = DIAGNOSTIC_PROFILES[profile_key]
+        results = self._ssm_tools.run_diagnostics(instance_id, keys)
+        failed = [r for r in results if r.status == DiagnosticStatus.ERROR]
+        status = DiagnosticStatus.OK if not failed else DiagnosticStatus.DEGRADED
+        return DiagnosticResult(
+            tool_name=f"ssm:profile:{profile_key}",
+            status=status,
+            summary=f"Profile '{profile_key}': ran {len(results)} commands, {len(failed)} errors",
+            metrics={
+                "profile": profile_key,
+                "commands_run": [r.tool_name for r in results],
+                "results": {r.tool_name: r.model_dump(exclude={"raw_output"}) for r in results},
+            },
+            raw_output="\n\n".join(
+                f"=== {r.tool_name} ===\n{r.raw_output or r.summary}" for r in results
+            ),
+        )
+
+    def resolve_instance_names(self, names: list[str]) -> dict[str, str]:
+        """Resolve a list of EC2 Name-tag values to instance IDs (read-only)."""
+        return self._ec2_tools.resolve_instance_names(names)
+
     # ── Convenience: run a standard diagnostic suite ───────────────────────
 
-    def run_standard_suite(self, instance_id: str) -> list[DiagnosticResult]:
+    def run_standard_suite(
+        self, instance_id: str, instance_ip: str | None = None
+    ) -> list[DiagnosticResult]:
         """
         Run the default suite of diagnostics for an instance.
 
-        Checks whether SSM is available first; if not, skips SSM tools and
-        falls back to the EC2/CloudWatch-only subset.
+        1. Always runs EC2 describe/status/volumes/console.
+        2. Queries Prometheus/Mimir for node metrics when the URL is configured
+           and ``instance_ip`` is known.
+        3. Falls back to SSM host diagnostics when the instance is SSM-managed.
         """
         results: list[DiagnosticResult] = []
 
-        # Always run EC2 and CloudWatch tools
+        # EC2 API tools – always run
         for tool in [
             "ec2:describe_instance",
             "ec2:get_instance_status",
             "ec2:describe_volumes",
             "ec2:get_console_output",
-            "cloudwatch:cpu_utilization",
-            "cloudwatch:disk_io",
-            "cloudwatch:network_io",
-            "cloudwatch:status_check_metrics",
         ]:
             results.append(self.call(instance_id, tool))
 
-        # Run SSM tools only if the instance is SSM-managed
+        # Prometheus / Mimir node metrics
+        if self._prom_tools.is_available() and instance_ip:
+            log.info("prometheus_available, querying node metrics", instance_id=instance_id)
+            results.append(
+                self.call(instance_id, "prometheus:node_metrics", instance_ip=instance_ip)
+            )
+        elif not self._prom_tools.is_available():
+            results.append(
+                DiagnosticResult(
+                    tool_name="prometheus:node_metrics",
+                    status=DiagnosticStatus.SKIPPED,
+                    summary="PROMETHEUS_URL not configured – node metrics skipped",
+                )
+            )
+        else:
+            results.append(
+                DiagnosticResult(
+                    tool_name="prometheus:node_metrics",
+                    status=DiagnosticStatus.SKIPPED,
+                    summary="Instance private IP unknown – cannot query Prometheus",
+                )
+            )
+
+        # SSM host-level diagnostics
         if self._ssm_tools.is_managed(instance_id):
             log.info("ssm_managed, running host-level diagnostics", instance_id=instance_id)
             for cmd_key in [
@@ -184,7 +308,10 @@ class EC2ToolServer:
             ]:
                 results.append(self.call(instance_id, f"ssm:{cmd_key}"))
         else:
-            log.info("instance not SSM-managed, skipping host diagnostics", instance_id=instance_id)
+            log.info(
+                "instance not SSM-managed, skipping host diagnostics",
+                instance_id=instance_id,
+            )
             results.append(
                 DiagnosticResult(
                     tool_name="ssm:availability",

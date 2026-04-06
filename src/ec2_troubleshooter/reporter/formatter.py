@@ -37,6 +37,21 @@ def format_text(report: InvestigationReport) -> str:
         "EC2 INVESTIGATION REPORT",
         f"Alert: {report.alert_title} [{report.alert_id}]",
         f"Source: {report.alert_source}  |  Severity: {report.severity}",
+    ]
+    if report.archetype:
+        lines.append(f"Archetype: {report.archetype}")
+    if report.aiops_state:
+        aiops_parts = [f"State: {report.aiops_state}"]
+        if report.aiops_health is not None:
+            aiops_parts.append(f"Health: {report.aiops_health}")
+        if report.aiops_failure is not None:
+            aiops_parts.append(f"Failure: {report.aiops_failure}")
+        if report.aiops_app_log_errors:
+            aiops_parts.append(f"App log errors: {report.aiops_app_log_errors}")
+        if report.aiops_policy_reason:
+            aiops_parts.append(f"Policy: {report.aiops_policy_reason}")
+        lines.append("AIOps: " + "  |  ".join(aiops_parts))
+    lines += [
         f"Summary: {report.summary}",
         "=" * 60,
     ]
@@ -95,9 +110,34 @@ def format_gchat_card(report: InvestigationReport) -> dict:
     }.get(report.severity, "⚪")
 
     header_text = f"{sev_icon} {report.alert_title}"
-    sub_text = f"Source: {report.alert_source} | Severity: {report.severity}"
+    sub_parts = [f"Source: {report.alert_source}", f"Severity: {report.severity}"]
+    if report.archetype:
+        sub_parts.append(f"Archetype: {report.archetype}")
+    sub_text = " | ".join(sub_parts)
 
     sections = []
+
+    # AIOps scores section (shown first when present)
+    if report.aiops_state:
+        score_parts = []
+        if report.aiops_health is not None:
+            score_parts.append(f"Health: <b>{report.aiops_health}</b>")
+        if report.aiops_failure is not None:
+            score_parts.append(f"Failure: <b>{report.aiops_failure}</b>")
+        if report.aiops_risk is not None:
+            score_parts.append(f"Risk: <b>{report.aiops_risk}</b>")
+        if report.aiops_app_log_errors:
+            score_parts.append(f"App log errors: <b>{report.aiops_app_log_errors}</b>")
+        if report.aiops_policy_reason:
+            score_parts.append(f"Policy: {report.aiops_policy_reason}")
+        score_text = (
+            f"State: <b>{report.aiops_state}</b><br>"
+            + "<br>".join(score_parts)
+        )
+        sections.append({
+            "header": "AIOps Scores",
+            "widgets": [{"textParagraph": {"text": score_text}}],
+        })
 
     # Summary section
     sections.append(

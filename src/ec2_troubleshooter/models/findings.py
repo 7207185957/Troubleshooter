@@ -88,6 +88,15 @@ class InvestigationReport(BaseModel):
     alert_title: str
     alert_source: str
     severity: str
+    archetype: str | None = None
+
+    # AIOps scores carried from the original alert for context in the report
+    aiops_health: float | None = None
+    aiops_failure: float | None = None
+    aiops_risk: float | None = None
+    aiops_state: str | None = None
+    aiops_policy_reason: str | None = None
+    aiops_app_log_errors: int = 0
 
     instances: list[InstanceInvestigation] = Field(default_factory=list)
     likely_causes: list[str] = Field(default_factory=list)
