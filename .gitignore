@@ -17,3 +17,5 @@ htmlcov/
 coverage.xml
 *.log
 docker/wheels/
+docker/wheels/
+*.tar.gz

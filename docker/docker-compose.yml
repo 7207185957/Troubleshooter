@@ -1,45 +1,53 @@
-version: "3.9"
-
 services:
   ec2-troubleshooter:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: ec2-troubleshooter:latest
+    # ── Image ────────────────────────────────────────────────────────────────
+    # Option A: use a pre-built image loaded from tar or pulled from ECR
+    image: ${IMAGE:-ec2-troubleshooter:latest}
+
+    # Option B: build locally (comment out 'image' above and uncomment below)
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile.offline   # use Dockerfile for online builds
+
+    container_name: ec2-troubleshooter
     restart: unless-stopped
+
+    # ── Port ─────────────────────────────────────────────────────────────────
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
+
+    # ── Configuration ─────────────────────────────────────────────────────────
+    # Mount your .env file — keeps secrets out of the compose file
+    env_file:
+      - ../.env                   # adjust path if .env lives elsewhere
+
+    # Any env vars here override the .env file values
     environment:
-      # ── AWS ───────────────────────────────────────────────────────────
-      AWS_REGION: ${AWS_REGION:-us-east-1}
-      # Use an EC2 instance role in production; credentials are auto-discovered.
-
-      # ── Air-gapped VPC endpoint overrides ─────────────────────────────
-      # Uncomment and fill in when running in a fully air-gapped VPC.
-      # USE_VPC_ENDPOINTS: "true"
-      # VPC_ENDPOINT_EC2: https://vpce-XXXX.ec2.${AWS_REGION}.vpce.amazonaws.com
-      # VPC_ENDPOINT_SSM: https://vpce-XXXX.ssm.${AWS_REGION}.vpce.amazonaws.com
-      # VPC_ENDPOINT_CLOUDWATCH: https://vpce-XXXX.monitoring.${AWS_REGION}.vpce.amazonaws.com
-      # VPC_ENDPOINT_STS: https://vpce-XXXX.sts.${AWS_REGION}.vpce.amazonaws.com
-
-      # ── Reporter ──────────────────────────────────────────────────────
-      REPORTER_TYPE: ${REPORTER_TYPE:-log}
-      REPORTER_GCHAT_WEBHOOK_URL: ${REPORTER_GCHAT_WEBHOOK_URL:-}
-      REPORTER_WEBHOOK_URL: ${REPORTER_WEBHOOK_URL:-}
-
-      # ── API ───────────────────────────────────────────────────────────
-      API_SECRET_TOKEN: ${API_SECRET_TOKEN:-}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: "1"
       LOG_FORMAT: json
 
-    # Mount a .env file for local dev only
-    # env_file:
-    #   - ../.env
+    # ── AWS credentials ───────────────────────────────────────────────────────
+    # The container inherits the EC2 instance role automatically via the
+    # metadata service (169.254.169.254).  No credential files are needed.
+    # If you use ~/.aws/credentials instead, uncomment:
+    # volumes:
+    #   - ${HOME}/.aws:/home/appuser/.aws:ro
 
+    # ── Logging ───────────────────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # ── Health check ──────────────────────────────────────────────────────────
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s

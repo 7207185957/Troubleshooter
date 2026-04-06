@@ -1,46 +1,98 @@
-# ────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # EC2 Troubleshooter – fully offline / air-gapped Docker image
 #
-# Use this when the build host itself has NO internet access.
-# Prerequisites:
-#   1. Download wheels on a machine with internet access:
-#      pip download -r requirements.txt -d ./docker/wheels/
-#   2. Copy the wheels/ directory alongside this Dockerfile.
-#   3. Run: docker build -f docker/Dockerfile.offline -t ec2-troubleshooter:offline .
-# ────────────────────────────────────────────────────────────────────────────
+# Use this Dockerfile when the BUILD HOST itself has no internet access and you
+# cannot pull from PyPI or any public registry.  All Python wheels are baked
+# into the image at build time from a local directory.
+#
+# ── How to prepare the wheels (run on a machine WITH internet) ─────────────
+#
+#   cd /path/to/Troubleshooter
+#   pip download -r requirements.txt -d docker/wheels/
+#
+# This downloads every wheel (including transitive dependencies) into
+# docker/wheels/.  No internet is needed after this step.
+#
+# ── How to build the image (can be done offline) ──────────────────────────
+#
+#   docker build -f docker/Dockerfile.offline -t ec2-troubleshooter:offline .
+#
+# ── How to transfer to the air-gapped EC2 instance ────────────────────────
+#
+# Option A – via S3 (recommended, uses S3 Gateway VPC endpoint):
+#   docker save ec2-troubleshooter:offline | gzip > ec2-troubleshooter.tar.gz
+#   aws s3 cp ec2-troubleshooter.tar.gz s3://your-bucket/docker/
+#   # On the EC2 instance:
+#   aws s3 cp s3://your-bucket/docker/ec2-troubleshooter.tar.gz .
+#   docker load < ec2-troubleshooter.tar.gz
+#
+# Option B – via ECR (uses ECR VPC endpoint):
+#   See docker/Dockerfile for push instructions.
+#
+# ── How to run ────────────────────────────────────────────────────────────
+#
+#   docker run -d \
+#     --name ec2-troubleshooter \
+#     --restart unless-stopped \
+#     --env-file /etc/ec2-troubleshooter/.env \
+#     -p 8080:8080 \
+#     ec2-troubleshooter:offline
+#
+#   Or use:  docker compose -f docker/docker-compose.yml up -d
+#
+# ──────────────────────────────────────────────────────────────────────────────
 
-ARG PYTHON_VERSION=3.12
-FROM python:${PYTHON_VERSION}-slim
+ARG PYTHON_VERSION=3.12-slim
+
+# ── Stage 1: install wheels into a prefix ─────────────────────────────────
+FROM python:${PYTHON_VERSION} AS builder
+
+WORKDIR /build
+
+# Wheels directory is expected at docker/wheels/ relative to repo root
+COPY docker/wheels/ /wheels/
+COPY requirements.txt .
+
+RUN pip install --upgrade pip --no-cache-dir --no-index --find-links /wheels \
+    && pip install \
+        --no-cache-dir \
+        --no-index \
+        --find-links /wheels \
+        --prefix=/install \
+        -r requirements.txt \
+    && rm -rf /wheels
+
+# ── Stage 2: minimal runtime image ────────────────────────────────────────
+FROM python:${PYTHON_VERSION} AS runtime
 
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --no-create-home appuser
+    && useradd --uid 1001 --gid appgroup --no-create-home --shell /sbin/nologin appuser
 
 WORKDIR /app
 
-# Install from pre-downloaded wheels (no network required)
-COPY docker/wheels/ /wheels/
-COPY requirements.txt ./
-
-RUN pip install --upgrade pip --no-cache-dir --no-index --find-links /wheels \
-    && pip install --no-cache-dir --no-index --find-links /wheels -r requirements.txt \
-    && rm -rf /wheels
+COPY --from=builder /install /usr/local
 
 COPY pyproject.toml ./
 COPY src/ ./src/
 
+RUN pip install --no-cache-dir --no-deps -e . \
+    && python -c "import ec2_troubleshooter; print('import OK')"
+
+USER appuser
+
+EXPOSE 8080
+
 ENV PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     LOG_FORMAT=json \
     LOG_LEVEL=INFO \
     API_HOST=0.0.0.0 \
     API_PORT=8080 \
     REPORTER_TYPE=log
 
-USER appuser
-
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c \
+        "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
 CMD ["python", "-m", "ec2_troubleshooter"]
