@@ -1,4 +1,11 @@
-from .alert import AIOpsScores, Alert, AlertSeverity, AnomalyContributor
+from .alert import (
+    AIOpsScores,
+    Alert,
+    AlertSeverity,
+    AnomalyContributor,
+    ContributorKind,
+    classify_contributor,
+)
 from .findings import (
     DiagnosticResult,
     DiagnosticStatus,
@@ -12,6 +19,8 @@ __all__ = [
     "Alert",
     "AlertSeverity",
     "AnomalyContributor",
+    "ContributorKind",
+    "classify_contributor",
     "DiagnosticResult",
     "DiagnosticStatus",
     "Finding",

@@ -62,6 +62,8 @@ class EvidenceAnalyzer:
             findings.extend(self._analyze_prometheus_node(result))
         elif tool.startswith("prometheus:contributor:"):
             findings.extend(self._analyze_prometheus_contributor(result))
+        elif tool.startswith("log_signal:"):
+            findings.extend(self._analyze_log_signal(result))
         elif tool.startswith("ssm:"):
             findings.extend(self._analyze_ssm(result))
 
@@ -320,12 +322,11 @@ class EvidenceAnalyzer:
 
     def _analyze_prometheus_contributor(self, result: DiagnosticResult) -> list[Finding]:
         """
-        Analyze a contributor metric queried directly from Mimir.
+        Analyze an app-specific metric queried from Mimir.
 
-        Surfaces the metric value as an INFO finding so it appears in the
-        report alongside OS-level evidence.  Threshold evaluation is left
-        to the human responder since the agent does not know the business
-        meaning of app-specific metrics.
+        Surfaces the current value as an INFO finding.  The agent does not
+        know the business threshold for app metrics — that is left to the
+        human responder.
         """
         if result.status == DiagnosticStatus.SKIPPED:
             return []
@@ -334,13 +335,52 @@ class EvidenceAnalyzer:
         return [
             Finding(
                 severity=FindingSeverity.INFO,
-                category="other",
-                message=f"Alert contributor metric '{metric}' current value: {value}",
+                category="app_metric",
+                message=f"App metric '{metric}' current value from Mimir: {value}",
                 evidence=[result.summary],
                 recommendation=(
                     "Compare this value against its normal baseline to determine "
                     "whether it is still elevated."
                 ),
+            )
+        ]
+
+    def _analyze_log_signal(self, result: DiagnosticResult) -> list[Finding]:
+        """
+        Analyze a log-based signal (app_log_errors, dag_log_errors).
+
+        The count comes directly from the alert payload — no Mimir query.
+        app_log_errors covers all application logs (including Airflow for
+        non-DAG errors).  dag_log_errors specifically covers Airflow DAG logs.
+        """
+        if result.status == DiagnosticStatus.SKIPPED:
+            return []
+
+        metric = result.metrics.get("metric", "")
+        count = result.metrics.get("count")
+        is_dag = "dag" in metric.lower()
+
+        if count is None or count == 0:
+            return []
+
+        label = "Airflow DAG log errors" if is_dag else "application log errors"
+        app_hint = (
+            "These are Airflow DAG execution errors. "
+            "Inspect the Airflow logs on this instance for failed DAG runs."
+            if is_dag
+            else
+            "These are application-level log errors. "
+            "Inspect application logs on this instance to identify the failing component."
+        )
+
+        sev = FindingSeverity.HIGH if count >= 100 else FindingSeverity.MEDIUM
+        return [
+            Finding(
+                severity=sev,
+                category="app_logs",
+                message=f"{int(count)} {label} reported in the alert window",
+                evidence=[result.summary],
+                recommendation=app_hint,
             )
         ]
 

@@ -206,9 +206,9 @@ class TestPrometheusFindings:
         )
         inv = InstanceInvestigation(instance_id="i-013", diagnostics=[result])
         analyzer.analyze(inv)
-        other_findings = [f for f in inv.findings if f.category == "other"]
-        assert len(other_findings) >= 1
-        assert other_findings[0].severity == FindingSeverity.INFO
+        app_findings = [f for f in inv.findings if f.category == "app_metric"]
+        assert len(app_findings) >= 1
+        assert app_findings[0].severity == FindingSeverity.INFO
 
 
 class TestOverallStatus:

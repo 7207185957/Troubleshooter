@@ -30,6 +30,7 @@ from ec2_troubleshooter.models.alert import (
     Alert,
     AlertSeverity,
     AnomalyContributor,
+    classify_contributor,
 )
 
 
@@ -115,27 +116,37 @@ class AlertNormalizer:
         # ── Metric contributors ───────────────────────────────────────────
         contributors: list[AnomalyContributor] = []
 
-        # "Contributors" section (categorical labels like "App logs")
+        # "Contributors" section (categorical labels like "App logs") – informational
         contrib_labels = p.get("contributors") or []
         if isinstance(contrib_labels, str):
             contrib_labels = [c.strip() for c in contrib_labels.split(",") if c.strip()]
 
-        # "Metric contributors" section (actual metric signal names)
+        # "Metric contributors" section (actual signal/metric names to investigate)
         metric_contribs = p.get("metric_contributors") or []
         if isinstance(metric_contribs, str):
             metric_contribs = [m.strip() for m in metric_contribs.split(",") if m.strip()]
 
         for name in metric_contribs:
+            kind = classify_contributor(name)
+            # For log signals, read the count directly from the alert payload
+            value: float | None = None
+            if name == "app_log_errors":
+                value = _safe_float(p.get("app_log_errors"))
+            elif name == "dag_log_errors":
+                value = _safe_float(p.get("dag_log_errors"))
             contributors.append(
-                AnomalyContributor(
-                    metric_name=name,
-                    value=_safe_float(p.get("app_log_errors") if "log_error" in name else None),
-                )
+                AnomalyContributor(metric_name=name, kind=kind, value=value)
             )
-        # If no metric contributors, fall back to categorical labels
+
+        # If no metric contributors, fall back to categorical labels (informational)
         if not contributors:
             for label in contrib_labels:
-                contributors.append(AnomalyContributor(metric_name=label))
+                contributors.append(
+                    AnomalyContributor(
+                        metric_name=label,
+                        kind=classify_contributor(label),
+                    )
+                )
 
         # ── AIOps scores ──────────────────────────────────────────────────
         aiops = AIOpsScores(
@@ -180,10 +191,15 @@ class AlertNormalizer:
     # ── Canonical ─────────────────────────────────────────────────────────
 
     def _parse_canonical(self, p: dict[str, Any]) -> Alert:
-        contributors = [
-            AnomalyContributor(**c) if isinstance(c, dict) else c
-            for c in p.get("contributors", [])
-        ]
+        contributors = []
+        for c in p.get("contributors", []):
+            if isinstance(c, dict):
+                # Classify if kind not already provided
+                if "kind" not in c:
+                    c = {**c, "kind": classify_contributor(c.get("metric_name", ""))}
+                contributors.append(AnomalyContributor(**c))
+            else:
+                contributors.append(c)
         return Alert(
             alert_id=p["alert_id"],
             source=p.get("source", "unknown"),

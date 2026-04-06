@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from ec2_troubleshooter.models.alert import Alert, AnomalyContributor
+from ec2_troubleshooter.models.alert import Alert, AnomalyContributor, ContributorKind
 from ec2_troubleshooter.models.findings import (
     DiagnosticResult,
     DiagnosticStatus,
@@ -194,35 +194,92 @@ class InvestigationOrchestrator:
         contributors: list[AnomalyContributor],
     ) -> list[DiagnosticResult]:
         """
-        For each alert contributor whose metric_name looks like a Prometheus
-        metric (no spaces, no special chars), query its current value and
-        recent trend from Mimir.
+        Route each alert contributor to the right evidence source based on kind:
 
-        This surfaces the exact signals that triggered the alert alongside the
-        OS-level evidence.
+        LOG_SIGNAL   – app_log_errors / dag_log_errors: count already in the
+                       alert payload.  A DiagnosticResult is synthesised from
+                       the contributor's value; no Mimir query is made.
+
+        INFRA_METRIC – cpu, memory, disk, etc.: already covered by
+                       prometheus:node_metrics.  Skip to avoid duplicate work.
+
+        APP_METRIC   – application-specific Prometheus metrics: query Mimir
+                       by metric name scoped to the instance IP.
+
+        UNKNOWN      – skip silently (can't determine what to do).
         """
         results: list[DiagnosticResult] = []
         seen: set[str] = set()
+
         for contributor in contributors:
             name = contributor.metric_name
-            # Skip generic descriptions like "CloudWatch alarm reason"
-            if not _looks_like_prom_metric(name) or name in seen:
+            if name in seen:
                 continue
             seen.add(name)
-            log.debug(
-                "querying contributor metric",
-                instance_id=instance_id,
-                metric=name,
-            )
-            results.append(
-                self._server.call(
-                    instance_id,
-                    "prometheus:contributor_metric",
-                    instance_ip=instance_ip,
-                    metric_name=name,
+
+            if contributor.kind == ContributorKind.LOG_SIGNAL:
+                # Synthesise a result from the count already present in the alert
+                results.append(self._make_log_signal_result(contributor))
+
+            elif contributor.kind == ContributorKind.INFRA_METRIC:
+                # Already covered by node_metrics — add an informational note
+                log.debug(
+                    "contributor is an infra metric, covered by node_metrics",
+                    instance_id=instance_id,
+                    metric=name,
                 )
-            )
+                results.append(DiagnosticResult(
+                    tool_name=f"prometheus:contributor:{name}",
+                    status=DiagnosticStatus.SKIPPED,
+                    summary=(
+                        f"Infra metric '{name}' is covered by prometheus:node_metrics"
+                    ),
+                    metrics={"metric": name, "kind": contributor.kind},
+                ))
+
+            elif contributor.kind == ContributorKind.APP_METRIC:
+                # Query this app-specific metric from Mimir
+                log.debug(
+                    "querying app contributor metric from Mimir",
+                    instance_id=instance_id,
+                    metric=name,
+                )
+                results.append(
+                    self._server.call(
+                        instance_id,
+                        "prometheus:contributor_metric",
+                        instance_ip=instance_ip,
+                        metric_name=name,
+                    )
+                )
+            # UNKNOWN → skip
+
         return results
+
+    @staticmethod
+    def _make_log_signal_result(contributor: AnomalyContributor) -> DiagnosticResult:
+        """
+        Synthesise a DiagnosticResult for a log-based signal (app_log_errors,
+        dag_log_errors).  The count comes from the alert payload itself —
+        no Mimir query is performed.
+        """
+        name = contributor.metric_name
+        count = contributor.value
+        is_dag = "dag" in name.lower()
+        signal_label = "Airflow DAG log errors" if is_dag else "App log errors"
+
+        status = DiagnosticStatus.DEGRADED if (count and count > 0) else DiagnosticStatus.OK
+        summary = (
+            f"{signal_label}: {int(count)} error(s) reported in alert"
+            if count is not None
+            else f"{signal_label}: count not available in alert payload"
+        )
+        return DiagnosticResult(
+            tool_name=f"log_signal:{name}",
+            status=status,
+            summary=summary,
+            metrics={"metric": name, "kind": contributor.kind, "count": count},
+        )
 
     def _enrich_metadata(
         self, inv: InstanceInvestigation, results: list[DiagnosticResult]
@@ -302,10 +359,3 @@ class InvestigationOrchestrator:
         )
 
 
-def _looks_like_prom_metric(name: str) -> bool:
-    """
-    Return True if *name* resembles a valid Prometheus metric name.
-    Prometheus metric names match [a-zA-Z_:][a-zA-Z0-9_:]*.
-    """
-    import re
-    return bool(re.match(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$", name))
