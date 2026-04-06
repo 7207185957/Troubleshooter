@@ -156,10 +156,58 @@ class Settings(BaseSettings):
     log_format: Literal["json", "console"] = Field(default="json", alias="LOG_FORMAT")
 
     # ── Validators ────────────────────────────────────────────────────────
+
+    @field_validator(
+        "reporter_type",
+        "log_level",
+        "log_format",
+        "aws_region",
+        "aws_profile",
+        "prometheus_url",
+        "prometheus_infra_org_id",
+        "prometheus_org_id",
+        "prometheus_username",
+        "prometheus_password",
+        "prometheus_token",
+        "prometheus_instance_label",
+        "prometheus_ca_cert",
+        "reporter_gchat_webhook_url",
+        "reporter_webhook_url",
+        "api_secret_token",
+        "vpc_endpoint_ec2",
+        "vpc_endpoint_ssm",
+        "vpc_endpoint_sts",
+        mode="before",
+    )
+    @classmethod
+    def strip_inline_comments(cls, v: object) -> object:
+        """
+        Strip inline comments and surrounding whitespace from string env values.
+
+        .env files sometimes have lines like:
+            REPORTER_TYPE=log          # or gchat / webhook
+            LOG_LEVEL=INFO             # DEBUG | INFO | WARNING | ERROR
+
+        python-dotenv passes the full string including the comment to pydantic,
+        which then fails validation.  This validator strips everything from the
+        first ' #' onwards and trims whitespace, so both forms work:
+            REPORTER_TYPE=log
+            REPORTER_TYPE=log   # inline comment
+        """
+        if isinstance(v, str):
+            # Strip inline comment: everything from first ' #' to end of line
+            if " #" in v:
+                v = v[: v.index(" #")]
+            return v.strip()
+        return v
+
     @field_validator("reporter_webhook_headers", "prometheus_app_org_ids", mode="before")
     @classmethod
     def parse_json_dict(cls, v: object) -> dict:
         if isinstance(v, str):
+            # Strip inline comments before JSON parsing
+            if " #" in v:
+                v = v[: v.index(" #")].strip()
             return json.loads(v)  # type: ignore[no-any-return]
         if isinstance(v, dict):
             return v  # type: ignore[return-value]

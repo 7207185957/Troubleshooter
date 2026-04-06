@@ -60,6 +60,26 @@ class TestSettings:
         assert s.reporter_type == "gchat"
         assert s.reporter_gchat_webhook_url == "https://chat.example.com/hook"
 
+    def test_inline_comment_stripped_from_reporter_type(self, monkeypatch):
+        monkeypatch.setenv("REPORTER_TYPE", "log          # or gchat / webhook")
+        s = Settings()
+        assert s.reporter_type == "log"
+
+    def test_inline_comment_stripped_from_log_level(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "INFO   # DEBUG | INFO | WARNING | ERROR")
+        s = Settings()
+        assert s.log_level == "INFO"
+
+    def test_inline_comment_stripped_from_prometheus_url(self, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_URL", "http://mimir.internal:8080/prometheus  # internal URL")
+        s = Settings()
+        assert s.prometheus_url == "http://mimir.internal:8080/prometheus"
+
+    def test_value_without_comment_unchanged(self, monkeypatch):
+        monkeypatch.setenv("REPORTER_TYPE", "log")
+        s = Settings()
+        assert s.reporter_type == "log"
+
     def test_webhook_headers_from_json_string(self, monkeypatch):
         monkeypatch.setenv("REPORTER_TYPE", "webhook")
         monkeypatch.setenv("REPORTER_WEBHOOK_URL", "https://example.com/ingest")
