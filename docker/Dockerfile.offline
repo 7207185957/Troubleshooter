@@ -1,0 +1,46 @@
+# ────────────────────────────────────────────────────────────────────────────
+# EC2 Troubleshooter – fully offline / air-gapped Docker image
+#
+# Use this when the build host itself has NO internet access.
+# Prerequisites:
+#   1. Download wheels on a machine with internet access:
+#      pip download -r requirements.txt -d ./docker/wheels/
+#   2. Copy the wheels/ directory alongside this Dockerfile.
+#   3. Run: docker build -f docker/Dockerfile.offline -t ec2-troubleshooter:offline .
+# ────────────────────────────────────────────────────────────────────────────
+
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
+
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --no-create-home appuser
+
+WORKDIR /app
+
+# Install from pre-downloaded wheels (no network required)
+COPY docker/wheels/ /wheels/
+COPY requirements.txt ./
+
+RUN pip install --upgrade pip --no-cache-dir --no-index --find-links /wheels \
+    && pip install --no-cache-dir --no-index --find-links /wheels -r requirements.txt \
+    && rm -rf /wheels
+
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+ENV PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1 \
+    LOG_FORMAT=json \
+    LOG_LEVEL=INFO \
+    API_HOST=0.0.0.0 \
+    API_PORT=8080 \
+    REPORTER_TYPE=log
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+
+CMD ["python", "-m", "ec2_troubleshooter"]

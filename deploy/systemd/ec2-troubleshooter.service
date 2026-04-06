@@ -1,0 +1,31 @@
+[Unit]
+Description=EC2 Troubleshooter - read-only EC2 diagnostic agent
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-troubleshooter
+Group=ec2-troubleshooter
+
+WorkingDirectory=/opt/ec2-troubleshooter
+
+# Source environment file (if present)
+EnvironmentFile=-/opt/ec2-troubleshooter/.env
+
+ExecStart=/opt/ec2-troubleshooter/venv/bin/python -m ec2_troubleshooter
+
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ec2-troubleshooter
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ec2-troubleshooter
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
