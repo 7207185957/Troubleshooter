@@ -1,7 +1,7 @@
 """Inbound alert model.
 
 Represents a normalised anomaly alert produced by any upstream platform
-(custom anomaly detector, Datadog, CloudWatch Anomaly Detection, etc.).
+(AIOps archetype notifier, Datadog, CloudWatch Alarm, etc.).
 The receiver layer is responsible for translating platform-specific payloads
 into this canonical shape before passing them to the orchestrator.
 """
@@ -27,7 +27,7 @@ class AnomalyContributor(BaseModel):
     """A single metric or dimension that contributed to the anomaly score."""
 
     metric_name: str
-    """Human-readable metric or signal name, e.g. 'CPUUtilization'."""
+    """Human-readable metric or signal name, e.g. 'app_log_errors'."""
 
     value: float | None = None
     """Observed value at alert time."""
@@ -45,6 +45,27 @@ class AnomalyContributor(BaseModel):
     """Arbitrary additional context from the upstream platform."""
 
 
+class AIOpsScores(BaseModel):
+    """Health / failure / risk scores from the AIOps archetype platform."""
+
+    health: float | None = None
+    failure: float | None = None
+    risk: float | None = None
+
+    # Anomaly counts
+    infra_anomalies: int = 0
+    app_anomalies: int = 0
+    app_log_errors: int = 0
+    dag_log_errors: int = 0
+
+    # State classification from the AIOps policy engine
+    state: str | None = None
+    """e.g. 'UNHEALTHY_STABLE', 'DEGRADING', 'HEALTHY'"""
+
+    policy_reason: str | None = None
+    """e.g. 'first_unhealthy_bucket'"""
+
+
 class Alert(BaseModel):
     """Normalised inbound alert."""
 
@@ -58,11 +79,19 @@ class Alert(BaseModel):
     # ── Affected resources ────────────────────────────────────────────────
     instance_ids: list[str] = Field(
         default_factory=list,
-        description="EC2 instance IDs affected by this alert",
+        description="EC2 instance IDs (i-xxx). Populated after name resolution.",
+    )
+    instance_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "EC2 instance Name-tag values as they appear in the alert "
+            "(e.g. 'ec2-dw-platform-use1-mimirread-102p'). "
+            "The orchestrator resolves these to instance IDs before investigating."
+        ),
     )
     archetype: str | None = Field(
         default=None,
-        description="Logical group / archetype label, e.g. 'kafka-broker', 'airflow-worker'",
+        description="Logical group / archetype label, e.g. 'platform-mimir (use1)'",
     )
     aws_region: str | None = Field(
         default=None,
@@ -74,6 +103,12 @@ class Alert(BaseModel):
     contributors: list[AnomalyContributor] = Field(
         default_factory=list,
         description="Metrics / dimensions that contributed to the anomaly",
+    )
+
+    # ── AIOps-specific scores and state ───────────────────────────────────
+    aiops: AIOpsScores | None = Field(
+        default=None,
+        description="Health, failure, risk scores and anomaly counts from the AIOps platform",
     )
 
     # ── Raw payload passthrough ───────────────────────────────────────────

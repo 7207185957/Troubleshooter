@@ -55,6 +55,7 @@ class EC2ToolServer:
             "ec2:get_instance_status",
             "ec2:describe_volumes",
             "ec2:get_console_output",
+            "ec2:resolve_instance_names",
         ]
         prom_tools = [
             "prometheus:node_metrics",
@@ -108,6 +109,24 @@ class EC2ToolServer:
             return self._ec2_tools.describe_volumes(instance_id)
         if tool_name == "ec2:get_console_output":
             return self._ec2_tools.get_console_output(instance_id)
+        if tool_name == "ec2:resolve_instance_names":
+            names = kwargs.get("names", [])
+            if not isinstance(names, list):
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary="names kwarg must be a list of strings",
+                )
+            mapping = self._ec2_tools.resolve_instance_names(names)
+            resolved = len(mapping)
+            unresolved = len(names) - resolved
+            status = DiagnosticStatus.OK if unresolved == 0 else DiagnosticStatus.DEGRADED
+            return DiagnosticResult(
+                tool_name=tool_name,
+                status=status,
+                summary=f"Resolved {resolved}/{len(names)} instance names to IDs",
+                metrics={"name_to_id": mapping, "unresolved_count": unresolved},
+            )
 
         # ── Prometheus / Mimir tools ───────────────────────────────────────
         if tool_name == "prometheus:node_metrics":
@@ -176,6 +195,10 @@ class EC2ToolServer:
             status=DiagnosticStatus.ERROR,
             summary=f"Unknown tool: '{tool_name}'",
         )
+
+    def resolve_instance_names(self, names: list[str]) -> dict[str, str]:
+        """Resolve a list of EC2 Name-tag values to instance IDs (read-only)."""
+        return self._ec2_tools.resolve_instance_names(names)
 
     # ── Convenience: run a standard diagnostic suite ───────────────────────
 

@@ -64,21 +64,37 @@ class InvestigationOrchestrator:
             instances=alert.instance_ids,
         )
 
+        aiops = alert.aiops
         report = InvestigationReport(
             alert_id=alert.alert_id,
             alert_title=alert.title,
             alert_source=alert.source,
             severity=alert.severity.value,
+            archetype=alert.archetype,
+            aiops_health=aiops.health if aiops else None,
+            aiops_failure=aiops.failure if aiops else None,
+            aiops_risk=aiops.risk if aiops else None,
+            aiops_state=aiops.state if aiops else None,
+            aiops_policy_reason=aiops.policy_reason if aiops else None,
+            aiops_app_log_errors=aiops.app_log_errors if aiops else 0,
             started_at=datetime.now(tz=UTC),
         )
 
-        if not alert.instance_ids:
-            report.error = "Alert contains no instance_ids – nothing to investigate"
+        # Resolve Name-tag hostnames → instance IDs when the alert gives names
+        effective_ids = list(alert.instance_ids)
+        if alert.instance_names and not effective_ids:
+            effective_ids = self._resolve_names(alert)
+
+        if not effective_ids:
+            report.error = (
+                "Alert contains no resolvable instance identifiers – nothing to investigate. "
+                f"instance_ids={alert.instance_ids}, instance_names={alert.instance_names}"
+            )
             report.completed_at = datetime.now(tz=UTC)
             log.warning("investigation.no_instances", alert_id=alert.alert_id)
             return report
 
-        for instance_id in alert.instance_ids:
+        for instance_id in effective_ids:
             inv = self._investigate_instance(instance_id, alert)
             report.instances.append(inv)
 
@@ -93,6 +109,33 @@ class InvestigationOrchestrator:
             likely_causes=len(report.likely_causes),
         )
         return report
+
+    # ── Name resolution ────────────────────────────────────────────────────
+
+    def _resolve_names(self, alert: Alert) -> list[str]:
+        """
+        Resolve ``alert.instance_names`` (EC2 Name tags) to instance IDs via
+        the EC2 describe_instances API.  Logs a warning for any names that
+        could not be resolved.
+        """
+        names = alert.instance_names
+        log.info("resolving instance names", alert_id=alert.alert_id, count=len(names))
+        name_to_id = self._server.resolve_instance_names(names)
+        resolved = list(name_to_id.values())
+        unresolved = [n for n in names if n not in name_to_id]
+        if unresolved:
+            log.warning(
+                "instance names could not be resolved",
+                alert_id=alert.alert_id,
+                unresolved=unresolved,
+            )
+        log.info(
+            "name resolution complete",
+            alert_id=alert.alert_id,
+            resolved=len(resolved),
+            unresolved=len(unresolved),
+        )
+        return resolved
 
     # ── Instance-level investigation ───────────────────────────────────────
 
