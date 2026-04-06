@@ -58,10 +58,10 @@ class EvidenceAnalyzer:
             findings.extend(self._analyze_volumes(result))
         elif tool == "ec2:get_console_output":
             findings.extend(self._analyze_console_output(result))
-        elif tool == "cloudwatch:cpu_utilization":
-            findings.extend(self._analyze_cpu(result))
-        elif tool == "cloudwatch:status_check_metrics":
-            findings.extend(self._analyze_cw_status_checks(result))
+        elif tool == "prometheus:node_metrics":
+            findings.extend(self._analyze_prometheus_node(result))
+        elif tool.startswith("prometheus:contributor:"):
+            findings.extend(self._analyze_prometheus_contributor(result))
         elif tool.startswith("ssm:"):
             findings.extend(self._analyze_ssm(result))
 
@@ -162,52 +162,187 @@ class EvidenceAnalyzer:
                 )
         return findings
 
-    # ── CloudWatch ─────────────────────────────────────────────────────────
+    # ── Prometheus / Mimir ─────────────────────────────────────────────────
 
-    def _analyze_cpu(self, result: DiagnosticResult) -> list[Finding]:
-        cpu_stats: dict[str, Any] = result.metrics.get("cpu_utilization_pct", {})
-        latest = cpu_stats.get("latest")
-        max_val = cpu_stats.get("max")
-        if latest is None:
-            return []
-        findings = []
-        if max_val is not None and max_val > 95:
-            findings.append(
-                Finding(
+    def _analyze_prometheus_node(self, result: DiagnosticResult) -> list[Finding]:
+        """Analyze the prometheus:node_metrics result (node_exporter data from Mimir)."""
+        m = result.metrics
+        findings: list[Finding] = []
+
+        # CPU
+        cpu = _float(m.get("cpu_usage_pct"))
+        if cpu is not None:
+            if cpu > 95:
+                findings.append(Finding(
                     severity=FindingSeverity.CRITICAL,
                     category="cpu",
-                    message=f"Sustained CPU saturation: max={max_val:.1f}%, latest={latest:.1f}%",
+                    message=f"CPU saturation: {cpu:.1f}% utilization (Prometheus)",
                     evidence=[result.summary],
                     recommendation=(
-                        "Identify the top CPU-consuming process. "
-                        "Check process_list and cpu_top diagnostic outputs."
+                        "Identify the top CPU-consuming process via process_list "
+                        "or cpu_top diagnostics."
                     ),
-                )
-            )
-        elif max_val is not None and max_val > 80:
-            findings.append(
-                Finding(
+                ))
+            elif cpu > 80:
+                findings.append(Finding(
                     severity=FindingSeverity.HIGH,
                     category="cpu",
-                    message=f"Elevated CPU utilization: max={max_val:.1f}%, latest={latest:.1f}%",
+                    message=f"Elevated CPU utilization: {cpu:.1f}% (Prometheus)",
                     evidence=[result.summary],
-                )
-            )
+                ))
+
+        # Load average
+        load15 = _float(m.get("load_15m"))
+        if load15 is not None and load15 > 10:
+            findings.append(Finding(
+                severity=FindingSeverity.HIGH,
+                category="cpu",
+                message=f"Sustained high 15-minute load average: {load15:.2f} (Prometheus)",
+                evidence=[result.summary],
+            ))
+
+        # Memory
+        mem_pct = _float(m.get("memory_used_pct"))
+        _float(m.get("memory_total_bytes"))
+        mem_avail = _float(m.get("memory_available_bytes"))
+        if mem_pct is not None:
+            if mem_pct > 95:
+                avail_mb = f"{mem_avail / 1024 / 1024:.0f} MB" if mem_avail else "unknown"
+                findings.append(Finding(
+                    severity=FindingSeverity.CRITICAL,
+                    category="memory",
+                    message=f"Memory nearly exhausted: {mem_pct:.1f}% used, {avail_mb} available (Prometheus)",
+                    evidence=[result.summary],
+                    recommendation=(
+                        "Check for memory leaks. Inspect process_list for top consumers."
+                    ),
+                ))
+            elif mem_pct > 85:
+                findings.append(Finding(
+                    severity=FindingSeverity.HIGH,
+                    category="memory",
+                    message=f"High memory usage: {mem_pct:.1f}% (Prometheus)",
+                    evidence=[result.summary],
+                ))
+
+        # Swap
+        swap_pct = _float(m.get("swap_used_pct"))
+        if swap_pct is not None and swap_pct > 50:
+            findings.append(Finding(
+                severity=FindingSeverity.HIGH,
+                category="memory",
+                message=f"Heavy swap usage: {swap_pct:.1f}% of swap in use (Prometheus)",
+                evidence=[result.summary],
+                recommendation=(
+                    "Heavy swap activity indicates memory pressure. "
+                    "Identify memory-hungry processes."
+                ),
+            ))
+
+        # OOM kills
+        oom_rate = _float(m.get("oom_kills_rate"))
+        if oom_rate is not None and oom_rate > 0:
+            findings.append(Finding(
+                severity=FindingSeverity.CRITICAL,
+                category="memory",
+                message=f"OOM killer active: {oom_rate:.4f} kills/sec (Prometheus)",
+                evidence=[result.summary],
+                recommendation=(
+                    "The kernel OOM killer is terminating processes. "
+                    "Check journal_kernel_oom for which processes are being killed."
+                ),
+            ))
+
+        # Disk usage – result may be a list of per-mountpoint values
+        disk_raw = m.get("disk_used_pct")
+        for entry in _iter_vector(disk_raw):
+            val = _float(entry.get("value"))
+            labels = entry.get("labels", {})
+            mountpoint = labels.get("mountpoint", labels.get("device", "unknown"))
+            if val is not None and val >= 95:
+                findings.append(Finding(
+                    severity=FindingSeverity.CRITICAL,
+                    category="disk",
+                    message=f"Disk almost full: {mountpoint} at {val:.1f}% (Prometheus)",
+                    evidence=[str(labels)],
+                    recommendation=(
+                        f"Filesystem {mountpoint} is critically full. "
+                        "Identify and remove large files or expand the volume."
+                    ),
+                ))
+            elif val is not None and val >= 85:
+                findings.append(Finding(
+                    severity=FindingSeverity.HIGH,
+                    category="disk",
+                    message=f"Disk usage high: {mountpoint} at {val:.1f}% (Prometheus)",
+                    evidence=[str(labels)],
+                ))
+
+        # Disk I/O util
+        io_raw = m.get("disk_io_util_pct")
+        for entry in _iter_vector(io_raw):
+            val = _float(entry.get("value"))
+            labels = entry.get("labels", {})
+            device = labels.get("device", "unknown")
+            if val is not None and val > 90:
+                findings.append(Finding(
+                    severity=FindingSeverity.HIGH,
+                    category="disk",
+                    message=f"Disk I/O saturation on {device}: {val:.1f}% util (Prometheus)",
+                    evidence=[result.summary],
+                ))
+
+        # Network errors
+        net_err = _float(m.get("network_errors_rate"))
+        if net_err is not None and net_err > 0:
+            findings.append(Finding(
+                severity=FindingSeverity.MEDIUM,
+                category="network",
+                message=f"Network errors/drops detected: {net_err:.4f}/sec (Prometheus)",
+                evidence=[result.summary],
+            ))
+
+        # File descriptor pressure
+        fd_pct = _float(m.get("fd_used_pct"))
+        if fd_pct is not None and fd_pct > 85:
+            findings.append(Finding(
+                severity=FindingSeverity.HIGH,
+                category="os",
+                message=f"File descriptor limit pressure: {fd_pct:.1f}% used (Prometheus)",
+                evidence=[result.summary],
+                recommendation=(
+                    "The system is approaching the file descriptor limit. "
+                    "Increase fs.file-max or investigate FD leaks."
+                ),
+            ))
+
         return findings
 
-    def _analyze_cw_status_checks(self, result: DiagnosticResult) -> list[Finding]:
-        findings = []
-        for check_name, stats in result.metrics.items():
-            if isinstance(stats, dict) and stats.get("max", 0) and stats["max"] > 0:
-                findings.append(
-                    Finding(
-                        severity=FindingSeverity.HIGH,
-                        category="os",
-                        message=f"CloudWatch metric {check_name} shows failures",
-                        evidence=[f"max={stats['max']}, latest={stats.get('latest')}"],
-                    )
-                )
-        return findings
+    def _analyze_prometheus_contributor(self, result: DiagnosticResult) -> list[Finding]:
+        """
+        Analyze a contributor metric queried directly from Mimir.
+
+        Surfaces the metric value as an INFO finding so it appears in the
+        report alongside OS-level evidence.  Threshold evaluation is left
+        to the human responder since the agent does not know the business
+        meaning of app-specific metrics.
+        """
+        if result.status == DiagnosticStatus.SKIPPED:
+            return []
+        metric = result.metrics.get("metric", result.tool_name)
+        value = result.metrics.get("result")
+        return [
+            Finding(
+                severity=FindingSeverity.INFO,
+                category="other",
+                message=f"Alert contributor metric '{metric}' current value: {value}",
+                evidence=[result.summary],
+                recommendation=(
+                    "Compare this value against its normal baseline to determine "
+                    "whether it is still elevated."
+                ),
+            )
+        ]
 
     # ── SSM ────────────────────────────────────────────────────────────────
 
@@ -519,6 +654,28 @@ def _deduplicate(findings: list[Finding]) -> list[Finding]:
             seen.add(key)
             out.append(f)
     return out
+
+
+def _float(value: Any) -> float | None:
+    """Safely cast *value* to float; return None if not possible."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_vector(value: Any) -> list[dict]:
+    """
+    If *value* is a list of {labels, value} dicts (Prometheus vector result),
+    return it.  If it is a scalar, wrap it so callers can iterate uniformly.
+    """
+    if isinstance(value, list):
+        return value
+    if value is not None:
+        return [{"labels": {}, "value": value}]
+    return []
 
 
 _SEV_ORDER = {

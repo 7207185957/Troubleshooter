@@ -23,7 +23,25 @@ class TestSettings:
         assert s.use_vpc_endpoints is True
         assert s.endpoint_for("ec2") == "https://vpce-abc.ec2.vpce.amazonaws.com"
         assert s.endpoint_for("ssm") == "https://vpce-def.ssm.vpce.amazonaws.com"
-        assert s.endpoint_for("sts") is None  # not set
+        assert s.endpoint_for("sts") is None
+
+    def test_prometheus_settings(self, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_URL", "http://mimir.internal:8080/prometheus")
+        monkeypatch.setenv("PROMETHEUS_ORG_ID", "tenant-1")
+        monkeypatch.setenv("PROMETHEUS_INSTANCE_LABEL", "instance")
+        monkeypatch.setenv("PROMETHEUS_LOOKBACK_MINUTES", "90")
+        s = Settings()
+        assert s.prometheus_url == "http://mimir.internal:8080/prometheus"
+        assert s.prometheus_org_id == "tenant-1"
+        assert s.prometheus_lookback_minutes == 90
+
+    def test_prometheus_defaults(self):
+        s = Settings()
+        assert s.prometheus_url is None
+        assert s.prometheus_instance_label == "instance"
+        assert s.prometheus_lookback_minutes == 60
+        assert s.prometheus_step_seconds == 60
+        assert s.prometheus_verify_ssl is True
 
     def test_no_vpc_endpoints_returns_none(self):
         s = Settings()

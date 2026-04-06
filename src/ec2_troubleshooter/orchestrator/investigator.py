@@ -4,14 +4,17 @@ Investigation Orchestrator.
 Drives the full investigation lifecycle for an Alert:
 
   1. For each affected instance in the alert, run the standard diagnostic suite
-     via the EC2ToolServer.
-  2. Extract instance metadata from the describe_instance result.
-  3. Run the EvidenceAnalyzer to turn raw results into structured findings.
-  4. Derive top-level likely causes across all instances.
-  5. Return an InvestigationReport ready to be sent to the reporting layer.
+     via the EC2ToolServer (EC2 APIs + Prometheus/Mimir node metrics + SSM).
+  2. Extract instance metadata from the describe_instance result so the private
+     IP is available for Prometheus label matching.
+  3. Query contributor metrics from the alert against Prometheus so that the
+     exact metric values that triggered the alert are included in evidence.
+  4. Run the EvidenceAnalyzer to turn raw results into structured findings.
+  5. Derive top-level likely causes across all instances.
+  6. Return an InvestigationReport ready to be sent to the reporting layer.
 
 The orchestrator contains no app-specific logic.  It only orchestrates generic
-EC2 / OS diagnostics.
+EC2 / OS / infrastructure diagnostics.
 """
 
 from __future__ import annotations
@@ -20,8 +23,9 @@ from datetime import UTC, datetime
 
 import structlog
 
-from ec2_troubleshooter.models.alert import Alert
+from ec2_troubleshooter.models.alert import Alert, AnomalyContributor
 from ec2_troubleshooter.models.findings import (
+    DiagnosticResult,
     DiagnosticStatus,
     FindingSeverity,
     InstanceInvestigation,
@@ -99,10 +103,28 @@ class InvestigationOrchestrator:
             started_at=datetime.now(tz=UTC),
         )
         try:
-            results = self._server.run_standard_suite(instance_id)
+            # Step 1: EC2 describe to get private IP before querying Prometheus
+            describe_result = self._server.call(instance_id, "ec2:describe_instance")
+            instance_ip = describe_result.metrics.get("private_ip") if describe_result.metrics else None
+
+            # Step 2: Run the full standard suite, passing the IP for Prometheus
+            results = self._server.run_standard_suite(instance_id, instance_ip=instance_ip)
+
+            # Avoid duplicate describe_instance in the diagnostics list
+            results = [r for r in results if r.tool_name != "ec2:describe_instance"]
+            results.insert(0, describe_result)
+
+            # Step 3: Query alert contributor metrics from Prometheus
+            if instance_ip and alert.contributors:
+                contributor_results = self._query_contributor_metrics(
+                    instance_id, instance_ip, alert.contributors
+                )
+                results.extend(contributor_results)
+
             inv.diagnostics = results
             self._enrich_metadata(inv, results)
             self._analyzer.analyze(inv)
+
         except Exception as exc:
             log.error(
                 "instance.investigate.error",
@@ -122,8 +144,45 @@ class InvestigationOrchestrator:
         )
         return inv
 
+    def _query_contributor_metrics(
+        self,
+        instance_id: str,
+        instance_ip: str,
+        contributors: list[AnomalyContributor],
+    ) -> list[DiagnosticResult]:
+        """
+        For each alert contributor whose metric_name looks like a Prometheus
+        metric (no spaces, no special chars), query its current value and
+        recent trend from Mimir.
+
+        This surfaces the exact signals that triggered the alert alongside the
+        OS-level evidence.
+        """
+        results: list[DiagnosticResult] = []
+        seen: set[str] = set()
+        for contributor in contributors:
+            name = contributor.metric_name
+            # Skip generic descriptions like "CloudWatch alarm reason"
+            if not _looks_like_prom_metric(name) or name in seen:
+                continue
+            seen.add(name)
+            log.debug(
+                "querying contributor metric",
+                instance_id=instance_id,
+                metric=name,
+            )
+            results.append(
+                self._server.call(
+                    instance_id,
+                    "prometheus:contributor_metric",
+                    instance_ip=instance_ip,
+                    metric_name=name,
+                )
+            )
+        return results
+
     def _enrich_metadata(
-        self, inv: InstanceInvestigation, results: list
+        self, inv: InstanceInvestigation, results: list[DiagnosticResult]
     ) -> None:
         """Populate InstanceInvestigation metadata from describe_instance result."""
         for r in results:
@@ -138,15 +197,19 @@ class InvestigationOrchestrator:
                 launch_str = m.get("launch_time", "")
                 if launch_str:
                     try:
-                        # Normalise the ISO string – boto3 may include +00:00 suffix
                         norm = launch_str.replace("Z", "+00:00")
                         inv.launch_time = datetime.fromisoformat(norm)
                     except (ValueError, AttributeError):
                         pass
                 break
+
+        for r in results:
             if r.tool_name == "ssm:availability" and r.status == DiagnosticStatus.SKIPPED:
                 inv.ssm_managed = False
-            elif r.tool_name.startswith("ssm:") and r.status != DiagnosticStatus.ERROR:
+            elif r.tool_name.startswith("ssm:") and r.status not in (
+                DiagnosticStatus.ERROR,
+                DiagnosticStatus.SKIPPED,
+            ):
                 inv.ssm_managed = True
 
     # ── Report-level synthesis ─────────────────────────────────────────────
@@ -175,7 +238,7 @@ class InvestigationOrchestrator:
                     causes.append((_sev.get(finding.severity, 99), finding.message))
 
         causes.sort(key=lambda x: x[0])
-        return [c[1] for c in causes[:10]]  # top 10 causes
+        return [c[1] for c in causes[:10]]
 
     @staticmethod
     def _build_report_summary(report: InvestigationReport) -> str:
@@ -188,11 +251,18 @@ class InvestigationOrchestrator:
         if total == 0:
             return "No instances investigated."
         if degraded == 0:
-            return (
-                f"Investigated {total} instance(s). No significant issues detected."
-            )
+            return f"Investigated {total} instance(s). No significant issues detected."
         likely = "; ".join(report.likely_causes[:3])
         return (
             f"Investigated {total} instance(s), {degraded} degraded/failed. "
             f"Top findings: {likely}"
         )
+
+
+def _looks_like_prom_metric(name: str) -> bool:
+    """
+    Return True if *name* resembles a valid Prometheus metric name.
+    Prometheus metric names match [a-zA-Z_:][a-zA-Z0-9_:]*.
+    """
+    import re
+    return bool(re.match(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$", name))

@@ -12,10 +12,27 @@ Environment variables (can also be provided via a .env file):
     USE_VPC_ENDPOINTS           – route all SDK calls through VPC endpoints
     VPC_ENDPOINT_EC2            – https://vpce-xxx.ec2.us-east-1.vpce.amazonaws.com
     VPC_ENDPOINT_SSM            – https://vpce-xxx.ssm.us-east-1.vpce.amazonaws.com
-    VPC_ENDPOINT_CLOUDWATCH     – https://vpce-xxx.monitoring.us-east-1.vpce.amazonaws.com
     VPC_ENDPOINT_STS            – https://vpce-xxx.sts.us-east-1.vpce.amazonaws.com
     SSM_POLL_INTERVAL_SEC       – seconds between SSM command status polls (default: 3)
     SSM_MAX_WAIT_SEC            – maximum seconds to wait for SSM result (default: 120)
+
+    PROMETHEUS_URL              – Base URL of the Prometheus / Grafana Mimir query endpoint
+                                  e.g. http://mimir.internal:8080/prometheus
+                                  or   http://grafana.internal/api/datasources/proxy/1
+    PROMETHEUS_ORG_ID           – Mimir tenant/org ID sent as X-Scope-OrgID header (optional)
+    PROMETHEUS_USERNAME         – Basic-auth username (optional)
+    PROMETHEUS_PASSWORD         – Basic-auth password (optional)
+    PROMETHEUS_TOKEN            – Bearer token (optional; used instead of basic auth)
+    PROMETHEUS_INSTANCE_LABEL   – Label name that identifies an instance by IP in your
+                                  metric series (default: instance).  Typically this is
+                                  the value node_exporter exposes, e.g. "10.0.1.5:9100".
+    PROMETHEUS_LOOKBACK_MINUTES – How many minutes of history to query (default: 60)
+    PROMETHEUS_STEP_SECONDS     – Resolution step for range queries in seconds (default: 60)
+    PROMETHEUS_VERIFY_SSL       – Verify TLS certificates (default: true).  Set to false
+                                  for internal CAs in air-gapped environments.
+    PROMETHEUS_CA_CERT          – Path to a custom CA bundle file (optional)
+    PROMETHEUS_TIMEOUT_SEC      – HTTP timeout for Prometheus queries (default: 30)
+
     REPORTER_TYPE               – gchat | webhook | log  (default: log)
     REPORTER_GCHAT_WEBHOOK_URL  – GChat incoming webhook URL
     REPORTER_WEBHOOK_URL        – generic webhook URL for custom integrations
@@ -53,8 +70,20 @@ class Settings(BaseSettings):
     use_vpc_endpoints: bool = Field(default=False, alias="USE_VPC_ENDPOINTS")
     vpc_endpoint_ec2: str | None = Field(default=None, alias="VPC_ENDPOINT_EC2")
     vpc_endpoint_ssm: str | None = Field(default=None, alias="VPC_ENDPOINT_SSM")
-    vpc_endpoint_cloudwatch: str | None = Field(default=None, alias="VPC_ENDPOINT_CLOUDWATCH")
     vpc_endpoint_sts: str | None = Field(default=None, alias="VPC_ENDPOINT_STS")
+
+    # ── Prometheus / Grafana Mimir ─────────────────────────────────────────
+    prometheus_url: str | None = Field(default=None, alias="PROMETHEUS_URL")
+    prometheus_org_id: str | None = Field(default=None, alias="PROMETHEUS_ORG_ID")
+    prometheus_username: str | None = Field(default=None, alias="PROMETHEUS_USERNAME")
+    prometheus_password: str | None = Field(default=None, alias="PROMETHEUS_PASSWORD")
+    prometheus_token: str | None = Field(default=None, alias="PROMETHEUS_TOKEN")
+    prometheus_instance_label: str = Field(default="instance", alias="PROMETHEUS_INSTANCE_LABEL")
+    prometheus_lookback_minutes: int = Field(default=60, alias="PROMETHEUS_LOOKBACK_MINUTES")
+    prometheus_step_seconds: int = Field(default=60, alias="PROMETHEUS_STEP_SECONDS")
+    prometheus_verify_ssl: bool = Field(default=True, alias="PROMETHEUS_VERIFY_SSL")
+    prometheus_ca_cert: str | None = Field(default=None, alias="PROMETHEUS_CA_CERT")
+    prometheus_timeout_sec: float = Field(default=30.0, alias="PROMETHEUS_TIMEOUT_SEC")
 
     # ── SSM command execution settings ───────────────────────────────────
     ssm_poll_interval_sec: float = Field(default=3.0, alias="SSM_POLL_INTERVAL_SEC")
@@ -106,14 +135,12 @@ class Settings(BaseSettings):
         return self
 
     def endpoint_for(self, service: str) -> str | None:
-        """Return the VPC endpoint URL override for *service* (ec2, ssm, cloudwatch, sts)."""
+        """Return the VPC endpoint URL override for *service* (ec2, ssm, sts)."""
         if not self.use_vpc_endpoints:
             return None
         mapping = {
             "ec2": self.vpc_endpoint_ec2,
             "ssm": self.vpc_endpoint_ssm,
-            "cloudwatch": self.vpc_endpoint_cloudwatch,
-            "monitoring": self.vpc_endpoint_cloudwatch,
             "sts": self.vpc_endpoint_sts,
         }
         return mapping.get(service)

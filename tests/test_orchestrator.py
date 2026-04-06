@@ -17,10 +17,19 @@ from ec2_troubleshooter.orchestrator.investigator import InvestigationOrchestrat
 @pytest.fixture
 def mock_tool_server():
     server = MagicMock()
-    ok = DiagnosticResult(tool_name="ec2:describe_instance", status=DiagnosticStatus.OK, summary="ok",
-                          metrics={"state": "running", "instance_type": "t3.medium",
-                                   "availability_zone": "us-east-1a", "private_ip": "10.0.0.1",
-                                   "tags": {"Name": "worker-1"}})
+    ok = DiagnosticResult(
+        tool_name="ec2:describe_instance",
+        status=DiagnosticStatus.OK,
+        summary="ok",
+        metrics={
+            "state": "running",
+            "instance_type": "t3.medium",
+            "availability_zone": "us-east-1a",
+            "private_ip": "10.0.0.1",
+            "tags": {"Name": "worker-1"},
+        },
+    )
+    server.call.return_value = ok
     server.run_standard_suite.return_value = [ok]
     return server
 
