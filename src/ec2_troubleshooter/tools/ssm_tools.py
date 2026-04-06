@@ -109,7 +109,162 @@ ALLOWLISTED_COMMANDS: dict[str, str] = {
     "fd_usage": (
         "cat /proc/sys/fs/file-nr && lsof 2>/dev/null | wc -l || echo 'lsof not available'"
     ),
+    # Top memory consumers (RSS sorted)
+    "memory_top_processes": (
+        "ps aux --sort=-%mem | head -20"
+    ),
+    # Detailed memory breakdown per process
+    "memory_smaps": (
+        "for pid in $(ps aux --sort=-%mem | awk 'NR>1{print $2}' | head -5); do "
+        "echo \"=== PID $pid ===\"; "
+        "cat /proc/$pid/status 2>/dev/null | grep -E '(Name|VmRSS|VmSwap|VmPeak)'; "
+        "done"
+    ),
+    # Open files per top process (FD leak detection)
+    "fd_top_processes": (
+        "for pid in $(ps aux --sort=-%mem | awk 'NR>1{print $2}' | head -5); do "
+        "echo \"=== PID $pid ($(cat /proc/$pid/comm 2>/dev/null)) ===\"; "
+        "ls /proc/$pid/fd 2>/dev/null | wc -l; "
+        "done"
+    ),
+    # Disk space details – largest directories
+    "disk_large_dirs": (
+        "du -xh --max-depth=3 / 2>/dev/null | sort -rh | head -20 "
+        "|| du -h --max-depth=3 / 2>/dev/null | sort -rh | head -20"
+    ),
+    # Recently modified large files
+    "disk_recent_large_files": (
+        "find / -xdev -type f -size +100M -printf '%T@ %s %p\\n' 2>/dev/null "
+        "| sort -rn | head -10 | awk '{printf \"%.0f MB  %s\\n\", $2/1048576, $3}'"
+    ),
+    # I/O wait and block device pressure
+    "disk_io_wait": (
+        "iostat -xz 1 5 2>/dev/null | tail -30 "
+        "|| cat /proc/diskstats | awk '{print $3, $6, $10}' | head -20"
+    ),
+    # CPU-intensive process details
+    "cpu_intensive_processes": (
+        "ps aux --sort=-%cpu | head -20 && echo '---' && "
+        "top -b -n 3 -d 2 -o -%CPU | grep -v '^$' | tail -20"
+    ),
+    # Per-CPU utilisation
+    "cpu_per_core": (
+        "mpstat -P ALL 1 3 2>/dev/null || "
+        "cat /proc/stat | head -20"
+    ),
+    # Services that have restarted recently (crash loops)
+    "systemd_recent_restarts": (
+        "systemctl list-units --state=failed --no-legend 2>/dev/null; "
+        "journalctl --since '1 hour ago' --no-pager 2>/dev/null "
+        "| grep -iE '(started|stopped|failed|restarting).*\\.service' | tail -30 "
+        "|| echo 'journalctl not available'"
+    ),
+    # Network connection counts by state (detect connection exhaustion)
+    "network_connection_counts": (
+        "ss -s 2>/dev/null || netstat -s 2>/dev/null | head -30"
+    ),
+    # Kernel ring buffer – last 100 lines (for any anomaly context)
+    "dmesg_recent": (
+        "dmesg --time-format=reltime 2>/dev/null | tail -50 || dmesg | tail -50"
+    ),
+    # App log tail – last 200 lines of common log locations
+    "app_log_tail": (
+        "for logdir in /var/log/app /var/log/application /opt/app/logs "
+        "/var/log/airflow /home/airflow/logs; do "
+        "if [ -d \"$logdir\" ]; then "
+        "echo \"=== $logdir ===\"; "
+        "find \"$logdir\" -name '*.log' -newer /proc/1 -type f 2>/dev/null "
+        "| head -3 | xargs tail -n 50 2>/dev/null; "
+        "fi; done"
+    ),
 }
+
+
+# ── Targeted diagnostic profiles ──────────────────────────────────────────
+#
+# Each profile is an ordered list of command keys to run when a specific
+# contributor kind is the primary alert signal.  The orchestrator picks
+# the profile that best matches the alert contributors.
+#
+# All keys must be present in ALLOWLISTED_COMMANDS above.
+
+DIAGNOSTIC_PROFILES: dict[str, list[str]] = {
+    # Triggered when cpu / load_average is the alert contributor
+    "cpu": [
+        "load_average",
+        "cpu_intensive_processes",
+        "cpu_per_core",
+        "systemd_failed",
+        "systemd_recent_restarts",
+        "dmesg_errors",
+        "zombie_processes",
+        "fd_usage",
+    ],
+    # Triggered when memory is the alert contributor
+    "memory": [
+        "memory_free",
+        "memory_vmstat",
+        "memory_top_processes",
+        "memory_smaps",
+        "journal_kernel_oom",
+        "systemd_failed",
+        "systemd_recent_restarts",
+        "dmesg_errors",
+        "swap_status" if "swap_status" in ALLOWLISTED_COMMANDS else "memory_vmstat",
+    ],
+    # Triggered when disk usage or disk I/O is the alert contributor
+    "disk": [
+        "disk_usage",
+        "disk_inodes",
+        "disk_io_wait",
+        "disk_large_dirs",
+        "disk_recent_large_files",
+        "systemd_failed",
+        "dmesg_errors",
+        "process_list",
+    ],
+    # Triggered when network metrics are the alert contributor
+    "network": [
+        "network_connections",
+        "network_connection_counts",
+        "network_stats",
+        "dmesg_errors",
+        "systemd_failed",
+        "process_list",
+    ],
+    # Triggered when an app metric is the alert contributor — lightweight OS baseline
+    "app": [
+        "load_average",
+        "memory_free",
+        "disk_usage",
+        "process_list",
+        "systemd_failed",
+        "systemd_recent_restarts",
+        "app_log_tail",
+        "journal_errors",
+        "dmesg_errors",
+    ],
+    # Full baseline — used when contributor is unknown or for initial triage
+    "baseline": [
+        "load_average",
+        "memory_free",
+        "disk_usage",
+        "disk_inodes",
+        "process_list",
+        "zombie_processes",
+        "systemd_failed",
+        "dmesg_errors",
+        "journal_errors",
+        "journal_kernel_oom",
+        "network_connections",
+        "fd_usage",
+        "ntp_status",
+    ],
+}
+
+# Fix: remove any keys that slipped in that aren't in ALLOWLISTED_COMMANDS
+for _profile_name, _keys in DIAGNOSTIC_PROFILES.items():
+    DIAGNOSTIC_PROFILES[_profile_name] = [k for k in _keys if k in ALLOWLISTED_COMMANDS]
 
 
 class SSMTools:

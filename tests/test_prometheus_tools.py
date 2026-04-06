@@ -164,10 +164,26 @@ class TestOrgIDHeader:
             )
         )
         tools = PrometheusTools(settings_with_prom)
-        tools.query("up")
+        # org_id must be explicitly passed per-request (per-tenant routing)
+        tools.query("up", org_id="my-org")
         assert route.called
         request = route.calls[0].request
         assert request.headers.get("x-scope-orgid") == "my-org"
+
+    @respx.mock
+    def test_different_org_ids_per_call(self, settings_with_prom):
+        route = respx.post(f"{MIMIR_URL}/api/v1/query").mock(
+            return_value=httpx.Response(
+                200,
+                json={"status": "success", "data": {"resultType": "vector", "result": []}},
+            )
+        )
+        tools = PrometheusTools(settings_with_prom)
+        tools.query("up", org_id="infra-tenant")
+        tools.query("app_metric", org_id="app-tenant")
+        assert route.call_count == 2
+        assert route.calls[0].request.headers.get("x-scope-orgid") == "infra-tenant"
+        assert route.calls[1].request.headers.get("x-scope-orgid") == "app-tenant"
 
 
 # ── get_contributor_metrics ───────────────────────────────────────────────

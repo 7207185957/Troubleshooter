@@ -66,3 +66,46 @@ class TestSettings:
         monkeypatch.setenv("REPORTER_WEBHOOK_HEADERS", '{"X-Api-Key": "secret"}')
         s = Settings()
         assert s.reporter_webhook_headers == {"X-Api-Key": "secret"}
+
+    def test_multi_tenant_infra_org_id(self, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_INFRA_ORG_ID", "infra-tenant")
+        monkeypatch.setenv("PROMETHEUS_ORG_ID", "legacy-fallback")
+        s = Settings()
+        # infra_org_id should prefer the specific field
+        assert s.infra_org_id() == "infra-tenant"
+
+    def test_multi_tenant_infra_fallback_to_legacy(self, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_ORG_ID", "legacy-org")
+        s = Settings()
+        assert s.infra_org_id() == "legacy-org"
+
+    def test_app_org_id_exact_match(self, monkeypatch):
+        monkeypatch.setenv(
+            "PROMETHEUS_APP_ORG_IDS",
+            '{"platform-mimir":"mimir-app","airflow":"airflow-app","_default":"app-general"}',
+        )
+        s = Settings()
+        assert s.app_org_id_for("platform-mimir") == "mimir-app"
+        assert s.app_org_id_for("airflow") == "airflow-app"
+
+    def test_app_org_id_prefix_match(self, monkeypatch):
+        monkeypatch.setenv(
+            "PROMETHEUS_APP_ORG_IDS",
+            '{"platform-mimir":"mimir-app","_default":"app-general"}',
+        )
+        s = Settings()
+        # "platform-mimir (use1)" should prefix-match "platform-mimir"
+        assert s.app_org_id_for("platform-mimir (use1)") == "mimir-app"
+
+    def test_app_org_id_default_fallback(self, monkeypatch):
+        monkeypatch.setenv(
+            "PROMETHEUS_APP_ORG_IDS",
+            '{"_default":"app-general"}',
+        )
+        s = Settings()
+        assert s.app_org_id_for("unknown-archetype") == "app-general"
+
+    def test_app_org_id_no_mapping_falls_back_to_legacy(self, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_ORG_ID", "legacy-org")
+        s = Settings()
+        assert s.app_org_id_for("any-archetype") == "legacy-org"

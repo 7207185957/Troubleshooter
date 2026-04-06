@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from ec2_troubleshooter.config.settings import Settings
 from ec2_troubleshooter.models.alert import (
     Alert,
     AlertSeverity,
@@ -161,8 +162,10 @@ class TestOrchestratorRouting:
             metrics={"state": "running", "private_ip": "10.0.1.5"},
         )
         mock_server.call.return_value = ok
-        mock_server.run_standard_suite.return_value = [ok]
-        return InvestigationOrchestrator(mock_server), mock_server
+        mock_server._prom_tools.is_available.return_value = False
+        mock_server._ssm_tools.is_managed.return_value = False
+        settings = Settings(AWS_REGION="us-east-1")
+        return InvestigationOrchestrator(mock_server, settings), mock_server
 
     def test_log_signal_NOT_queried_from_mimir(self):
         orch, mock_server = self._make_orchestrator()
@@ -181,7 +184,6 @@ class TestOrchestratorRouting:
             ],
         )
         orch.investigate(alert)
-        # prometheus:contributor_metric must NOT have been called
         calls = [str(c) for c in mock_server.call.call_args_list]
         assert not any("contributor_metric" in c for c in calls)
 
@@ -210,6 +212,11 @@ class TestOrchestratorRouting:
             tool_name=tool, status=DiagnosticStatus.OK, summary="ok",
             metrics={"state": "running", "private_ip": "10.0.1.5"},
         )
+        settings = Settings(
+            AWS_REGION="us-east-1",
+            PROMETHEUS_APP_ORG_IDS='{"_default":"app-tenant"}',
+        )
+        orch2 = InvestigationOrchestrator(mock_server, settings)
         alert = Alert(
             alert_id="a3",
             source="aiops_archetype",
@@ -223,7 +230,7 @@ class TestOrchestratorRouting:
                 )
             ],
         )
-        orch.investigate(alert)
+        orch2.investigate(alert)
         calls = [str(c) for c in mock_server.call.call_args_list]
         assert any("contributor_metric" in c for c in calls)
 

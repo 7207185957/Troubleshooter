@@ -5,12 +5,13 @@ from __future__ import annotations
 import boto3
 import pytest
 
+from ec2_troubleshooter.config.settings import Settings
+
 try:
     from moto import mock_aws
 except ImportError:
     from moto import mock_ec2 as mock_aws  # type: ignore[no-reattr]
 
-from ec2_troubleshooter.config.settings import Settings
 from ec2_troubleshooter.tools.aws_client import AWSClientFactory
 from ec2_troubleshooter.tools.ec2_tools import EC2Tools
 
@@ -109,6 +110,7 @@ class TestOrchestratorNameResolution:
         from ec2_troubleshooter.models.findings import DiagnosticResult, DiagnosticStatus
         from ec2_troubleshooter.orchestrator.investigator import InvestigationOrchestrator
 
+
         mock_server = MagicMock()
         ok = DiagnosticResult(
             tool_name="ec2:describe_instance",
@@ -116,10 +118,11 @@ class TestOrchestratorNameResolution:
             summary="ok",
             metrics={"state": "running", "instance_type": "r6g.xlarge",
                      "private_ip": "10.0.1.5", "availability_zone": "us-east-1a",
-                     "tags": {"Name": "ec2-dw-platform-use1-mimirread-102p"}},
+                     "tags": {}},
         )
         mock_server.call.return_value = ok
-        mock_server.run_standard_suite.return_value = [ok]
+        mock_server._prom_tools.is_available.return_value = False
+        mock_server._ssm_tools.is_managed.return_value = False
         mock_server.resolve_instance_names.return_value = {
             "ec2-dw-platform-use1-mimirread-102p": "i-0abc123",
         }
@@ -132,7 +135,7 @@ class TestOrchestratorNameResolution:
             instance_names=["ec2-dw-platform-use1-mimirread-102p"],
         )
 
-        orch = InvestigationOrchestrator(mock_server)
+        orch = InvestigationOrchestrator(mock_server, Settings(AWS_REGION="us-east-1"))
         report = orch.investigate(alert)
 
         # resolve_instance_names should have been called with the name list
@@ -149,8 +152,10 @@ class TestOrchestratorNameResolution:
         from ec2_troubleshooter.orchestrator.investigator import InvestigationOrchestrator
 
         mock_server = MagicMock()
+        mock_server._prom_tools.is_available.return_value = False
+        mock_server._ssm_tools.is_managed.return_value = False
         alert = Alert(alert_id="a2", source="test", title="Empty alert")
-        orch = InvestigationOrchestrator(mock_server)
+        orch = InvestigationOrchestrator(mock_server, Settings(AWS_REGION="us-east-1"))
         report = orch.investigate(alert)
         assert report.error is not None
         assert len(report.instances) == 0
@@ -162,13 +167,15 @@ class TestOrchestratorNameResolution:
         from ec2_troubleshooter.models.findings import DiagnosticResult, DiagnosticStatus
         from ec2_troubleshooter.orchestrator.investigator import InvestigationOrchestrator
 
+
         mock_server = MagicMock()
         ok = DiagnosticResult(
             tool_name="ec2:describe_instance", status=DiagnosticStatus.OK, summary="ok",
             metrics={"state": "running", "private_ip": "10.0.1.5"}
         )
         mock_server.call.return_value = ok
-        mock_server.run_standard_suite.return_value = [ok]
+        mock_server._prom_tools.is_available.return_value = False
+        mock_server._ssm_tools.is_managed.return_value = False
 
         alert = Alert(
             alert_id="a3",
@@ -182,7 +189,7 @@ class TestOrchestratorNameResolution:
                 policy_reason="first_unhealthy_bucket",
             ),
         )
-        orch = InvestigationOrchestrator(mock_server)
+        orch = InvestigationOrchestrator(mock_server, Settings(AWS_REGION="us-east-1"))
         report = orch.investigate(alert)
 
         assert report.aiops_health == 70.0

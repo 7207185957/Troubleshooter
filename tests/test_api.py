@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +23,7 @@ def app(settings):
         patch("ec2_troubleshooter.alert.receiver.EC2ToolServer"),
         patch("ec2_troubleshooter.alert.receiver.InvestigationOrchestrator") as mock_orch,
         patch("ec2_troubleshooter.alert.receiver.build_reporter"),
+        patch("ec2_troubleshooter.alert.receiver.AlertQueueManager") as mock_queue,
     ):
         mock_orch.return_value.investigate.return_value = InvestigationReport(
             alert_id="test-001",
@@ -31,6 +32,10 @@ def app(settings):
             severity="HIGH",
             summary="No issues found",
         )
+        mock_queue.return_value.enqueue.return_value = True
+        mock_queue.return_value.stats.return_value = MagicMock(depth=0)
+        mock_queue.return_value.start = MagicMock(return_value=None)
+        mock_queue.return_value.stop = MagicMock(return_value=None)
         return create_app(settings)
 
 

@@ -86,9 +86,12 @@ class TestDispatch:
             summary="ok",
         )
         mock_server._prom_tools.get_node_metrics.return_value = expected
-        result = mock_server.call("i-abc", "prometheus:node_metrics", instance_ip="10.0.0.1")
+        result = mock_server.call("i-abc", "prometheus:node_metrics",
+                                  instance_ip="10.0.0.1", org_id="infra")
         assert result.status == DiagnosticStatus.OK
-        mock_server._prom_tools.get_node_metrics.assert_called_once_with("10.0.0.1")
+        mock_server._prom_tools.get_node_metrics.assert_called_once_with(
+            "10.0.0.1", org_id="infra"
+        )
 
     def test_prometheus_query_requires_promql(self, mock_server):
         result = mock_server.call("i-abc", "prometheus:query")

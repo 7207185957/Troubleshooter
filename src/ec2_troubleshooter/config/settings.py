@@ -16,11 +16,20 @@ Environment variables (can also be provided via a .env file):
     SSM_POLL_INTERVAL_SEC       – seconds between SSM command status polls (default: 3)
     SSM_MAX_WAIT_SEC            – maximum seconds to wait for SSM result (default: 120)
 
-    PROMETHEUS_URL              – Base URL of the Prometheus / Grafana Mimir query endpoint
+    ── Prometheus / Grafana Mimir (multi-tenant) ──────────────────────────────
+
+    PROMETHEUS_URL              – Base URL shared by all Mimir tenants
                                   e.g. http://mimir.internal:8080/prometheus
-                                  or   http://grafana.internal/api/datasources/proxy/1
-    PROMETHEUS_ORG_ID           – Mimir tenant/org ID sent as X-Scope-OrgID header (optional)
-    PROMETHEUS_USERNAME         – Basic-auth username (optional)
+    PROMETHEUS_INFRA_ORG_ID     – X-Scope-OrgID for infra/node_exporter metrics
+                                  (cpu, memory, disk, network)
+    PROMETHEUS_APP_ORG_IDS      – JSON object mapping archetype → org ID for
+                                  application metrics.  The archetype is matched
+                                  against alert.archetype.  A special key "_default"
+                                  is used when no specific match is found.
+                                  Example:
+                                    {"platform-mimir":"mimir-app","airflow":"airflow-app",
+                                     "_default":"app-metrics"}
+    PROMETHEUS_USERNAME         – Basic-auth username (optional, applied to all tenants)
     PROMETHEUS_PASSWORD         – Basic-auth password (optional)
     PROMETHEUS_TOKEN            – Bearer token (optional; used instead of basic auth)
     PROMETHEUS_INSTANCE_LABEL   – Label name that identifies an instance by IP in your
@@ -32,6 +41,17 @@ Environment variables (can also be provided via a .env file):
                                   for internal CAs in air-gapped environments.
     PROMETHEUS_CA_CERT          – Path to a custom CA bundle file (optional)
     PROMETHEUS_TIMEOUT_SEC      – HTTP timeout for Prometheus queries (default: 30)
+
+    ── Alert queue ────────────────────────────────────────────────────────────
+
+    ALERT_QUEUE_MAX_SIZE        – Maximum number of pending alerts in the queue
+                                  before new arrivals are rejected (default: 1000)
+    ALERT_QUEUE_WORKERS         – Number of concurrent investigation workers
+                                  consuming from the queue (default: 4)
+    ALERT_QUEUE_RETRY_ATTEMPTS  – How many times to retry a failed investigation
+                                  before discarding (default: 2)
+
+    ── Reporter ───────────────────────────────────────────────────────────────
 
     REPORTER_TYPE               – gchat | webhook | log  (default: log)
     REPORTER_GCHAT_WEBHOOK_URL  – GChat incoming webhook URL
@@ -72,22 +92,45 @@ class Settings(BaseSettings):
     vpc_endpoint_ssm: str | None = Field(default=None, alias="VPC_ENDPOINT_SSM")
     vpc_endpoint_sts: str | None = Field(default=None, alias="VPC_ENDPOINT_STS")
 
-    # ── Prometheus / Grafana Mimir ─────────────────────────────────────────
+    # ── SSM command execution settings ───────────────────────────────────
+    ssm_poll_interval_sec: float = Field(default=3.0, alias="SSM_POLL_INTERVAL_SEC")
+    ssm_max_wait_sec: float = Field(default=120.0, alias="SSM_MAX_WAIT_SEC")
+
+    # ── Prometheus / Grafana Mimir (multi-tenant) ─────────────────────────
     prometheus_url: str | None = Field(default=None, alias="PROMETHEUS_URL")
+
+    # Infra org — node_exporter, cpu/memory/disk metrics
+    prometheus_infra_org_id: str | None = Field(
+        default=None, alias="PROMETHEUS_INFRA_ORG_ID"
+    )
+
+    # App org mapping: archetype → X-Scope-OrgID
+    # Parsed from JSON string: {"platform-mimir": "mimir-app", "_default": "app-metrics"}
+    prometheus_app_org_ids: dict[str, str] = Field(
+        default_factory=dict, alias="PROMETHEUS_APP_ORG_IDS"
+    )
+
+    # Legacy single org ID – used as fallback when the specific fields are absent
     prometheus_org_id: str | None = Field(default=None, alias="PROMETHEUS_ORG_ID")
+
     prometheus_username: str | None = Field(default=None, alias="PROMETHEUS_USERNAME")
     prometheus_password: str | None = Field(default=None, alias="PROMETHEUS_PASSWORD")
     prometheus_token: str | None = Field(default=None, alias="PROMETHEUS_TOKEN")
-    prometheus_instance_label: str = Field(default="instance", alias="PROMETHEUS_INSTANCE_LABEL")
-    prometheus_lookback_minutes: int = Field(default=60, alias="PROMETHEUS_LOOKBACK_MINUTES")
+    prometheus_instance_label: str = Field(
+        default="instance", alias="PROMETHEUS_INSTANCE_LABEL"
+    )
+    prometheus_lookback_minutes: int = Field(
+        default=60, alias="PROMETHEUS_LOOKBACK_MINUTES"
+    )
     prometheus_step_seconds: int = Field(default=60, alias="PROMETHEUS_STEP_SECONDS")
     prometheus_verify_ssl: bool = Field(default=True, alias="PROMETHEUS_VERIFY_SSL")
     prometheus_ca_cert: str | None = Field(default=None, alias="PROMETHEUS_CA_CERT")
     prometheus_timeout_sec: float = Field(default=30.0, alias="PROMETHEUS_TIMEOUT_SEC")
 
-    # ── SSM command execution settings ───────────────────────────────────
-    ssm_poll_interval_sec: float = Field(default=3.0, alias="SSM_POLL_INTERVAL_SEC")
-    ssm_max_wait_sec: float = Field(default=120.0, alias="SSM_MAX_WAIT_SEC")
+    # ── Alert queue ───────────────────────────────────────────────────────
+    alert_queue_max_size: int = Field(default=1000, alias="ALERT_QUEUE_MAX_SIZE")
+    alert_queue_workers: int = Field(default=4, alias="ALERT_QUEUE_WORKERS")
+    alert_queue_retry_attempts: int = Field(default=2, alias="ALERT_QUEUE_RETRY_ATTEMPTS")
 
     # ── Reporter ─────────────────────────────────────────────────────────
     reporter_type: Literal["gchat", "webhook", "log"] = Field(
@@ -113,9 +156,9 @@ class Settings(BaseSettings):
     log_format: Literal["json", "console"] = Field(default="json", alias="LOG_FORMAT")
 
     # ── Validators ────────────────────────────────────────────────────────
-    @field_validator("reporter_webhook_headers", mode="before")
+    @field_validator("reporter_webhook_headers", "prometheus_app_org_ids", mode="before")
     @classmethod
-    def parse_headers(cls, v: object) -> dict[str, str]:
+    def parse_json_dict(cls, v: object) -> dict:
         if isinstance(v, str):
             return json.loads(v)  # type: ignore[no-any-return]
         if isinstance(v, dict):
@@ -144,6 +187,34 @@ class Settings(BaseSettings):
             "sts": self.vpc_endpoint_sts,
         }
         return mapping.get(service)
+
+    def infra_org_id(self) -> str | None:
+        """Return the X-Scope-OrgID to use for infra/node_exporter queries."""
+        return self.prometheus_infra_org_id or self.prometheus_org_id
+
+    def app_org_id_for(self, archetype: str | None) -> str | None:
+        """
+        Return the X-Scope-OrgID for app metrics belonging to *archetype*.
+
+        Lookup order:
+          1. Exact archetype match in prometheus_app_org_ids
+          2. Prefix match (e.g. "platform-mimir" matches "platform-mimir (use1)")
+          3. "_default" key in prometheus_app_org_ids
+          4. Legacy prometheus_org_id fallback
+        """
+        if not self.prometheus_app_org_ids:
+            return self.prometheus_org_id
+
+        if archetype:
+            # Exact match
+            if archetype in self.prometheus_app_org_ids:
+                return self.prometheus_app_org_ids[archetype]
+            # Prefix match (alert archetype may include region like "(use1)")
+            for key, org in self.prometheus_app_org_ids.items():
+                if key != "_default" and archetype.startswith(key):
+                    return org
+
+        return self.prometheus_app_org_ids.get("_default") or self.prometheus_org_id
 
 
 @lru_cache(maxsize=1)

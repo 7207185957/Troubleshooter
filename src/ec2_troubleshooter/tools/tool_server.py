@@ -26,7 +26,7 @@ from ec2_troubleshooter.models.findings import DiagnosticResult, DiagnosticStatu
 from .aws_client import AWSClientFactory
 from .ec2_tools import EC2Tools
 from .prometheus_tools import PrometheusTools
-from .ssm_tools import ALLOWLISTED_COMMANDS, SSMTools
+from .ssm_tools import ALLOWLISTED_COMMANDS, DIAGNOSTIC_PROFILES, SSMTools
 
 log = structlog.get_logger(__name__)
 
@@ -64,7 +64,8 @@ class EC2ToolServer:
             "prometheus:contributor_metric",
         ]
         ssm_tools = [f"ssm:{k}" for k in ALLOWLISTED_COMMANDS]
-        return sorted(ec2_tools + prom_tools + ssm_tools)
+        ssm_profiles = [f"ssm:profile:{k}" for k in DIAGNOSTIC_PROFILES]
+        return sorted(ec2_tools + prom_tools + ssm_tools + ssm_profiles)
 
     # ── Dispatch ───────────────────────────────────────────────────────────
 
@@ -99,6 +100,7 @@ class EC2ToolServer:
         self, instance_id: str, tool_name: str, **kwargs: object
     ) -> DiagnosticResult:
         instance_ip = str(kwargs.get("instance_ip", ""))
+        org_id = kwargs.get("org_id")  # optional X-Scope-OrgID override
 
         # ── EC2 tools ─────────────────────────────────────────────────────
         if tool_name == "ec2:describe_instance":
@@ -136,7 +138,9 @@ class EC2ToolServer:
                     status=DiagnosticStatus.ERROR,
                     summary="instance_ip kwarg required for prometheus:node_metrics",
                 )
-            return self._prom_tools.get_node_metrics(instance_ip)
+            return self._prom_tools.get_node_metrics(
+                instance_ip, org_id=str(org_id) if org_id else None
+            )
 
         if tool_name == "prometheus:query":
             promql = str(kwargs.get("promql", ""))
@@ -146,7 +150,11 @@ class EC2ToolServer:
                     status=DiagnosticStatus.ERROR,
                     summary="promql kwarg required for prometheus:query",
                 )
-            return self._prom_tools.query(promql, instance_ip=instance_ip or None)
+            return self._prom_tools.query(
+                promql,
+                instance_ip=instance_ip or None,
+                org_id=str(org_id) if org_id else None,
+            )
 
         if tool_name == "prometheus:query_range":
             promql = str(kwargs.get("promql", ""))
@@ -161,6 +169,7 @@ class EC2ToolServer:
                 promql,
                 instance_ip=instance_ip or None,
                 lookback_minutes=int(lookback) if lookback else None,
+                org_id=str(org_id) if org_id else None,
             )
 
         if tool_name == "prometheus:contributor_metric":
@@ -175,10 +184,21 @@ class EC2ToolServer:
             return self._prom_tools.get_contributor_metrics(
                 metric_name,
                 instance_ip,
+                org_id=str(org_id) if org_id else None,
                 extra_labels=extra_labels if isinstance(extra_labels, dict) else None,
             )
 
-        # ── SSM tools ─────────────────────────────────────────────────────
+        # ── SSM individual command ─────────────────────────────────────────
+        if tool_name.startswith("ssm:profile:"):
+            profile_key = tool_name[12:]
+            if profile_key not in DIAGNOSTIC_PROFILES:
+                return DiagnosticResult(
+                    tool_name=tool_name,
+                    status=DiagnosticStatus.ERROR,
+                    summary=f"Unknown SSM diagnostic profile '{profile_key}'",
+                )
+            return self._run_ssm_profile(instance_id, profile_key)
+
         if tool_name.startswith("ssm:"):
             command_key = tool_name[4:]
             if command_key not in ALLOWLISTED_COMMANDS:
@@ -194,6 +214,26 @@ class EC2ToolServer:
             tool_name=tool_name,
             status=DiagnosticStatus.ERROR,
             summary=f"Unknown tool: '{tool_name}'",
+        )
+
+    def _run_ssm_profile(self, instance_id: str, profile_key: str) -> DiagnosticResult:
+        """Run all commands in a named diagnostic profile sequentially."""
+        keys = DIAGNOSTIC_PROFILES[profile_key]
+        results = self._ssm_tools.run_diagnostics(instance_id, keys)
+        failed = [r for r in results if r.status == DiagnosticStatus.ERROR]
+        status = DiagnosticStatus.OK if not failed else DiagnosticStatus.DEGRADED
+        return DiagnosticResult(
+            tool_name=f"ssm:profile:{profile_key}",
+            status=status,
+            summary=f"Profile '{profile_key}': ran {len(results)} commands, {len(failed)} errors",
+            metrics={
+                "profile": profile_key,
+                "commands_run": [r.tool_name for r in results],
+                "results": {r.tool_name: r.model_dump(exclude={"raw_output"}) for r in results},
+            },
+            raw_output="\n\n".join(
+                f"=== {r.tool_name} ===\n{r.raw_output or r.summary}" for r in results
+            ),
         )
 
     def resolve_instance_names(self, names: list[str]) -> dict[str, str]:
